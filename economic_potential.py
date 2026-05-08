@@ -650,7 +650,7 @@ def plot_map(cfg, compare_df):
 
 
 def plot_sensitivity(cfg, df_sens, params_base):
-    """Sensitivity plot: economic potential vs. parameter variations."""
+    """Normalized sensitivity plot: % parameter variation vs % economic potential variation."""
     base_font = 11
     factor = 1 / 0.5
     plt.rcParams.update({
@@ -661,111 +661,221 @@ def plot_sensitivity(cfg, df_sens, params_base):
         "mathtext.fontset": "cm",
     })
 
-    plot_params = cfg.sensitivity_plot_params
-    param_labels = {
-        "CAPEX_Air": r"$C_{\mathrm{inv,Air}}$ (€/kW)",
-        "CAPEX_Water": r"$C_{\mathrm{inv,Water}}$ (€/kW)",
-        "c_el_L": r"$C_{\mathrm{el,Air}}$ (€/kWh)",
-        "c_el_W": r"$C_{\mathrm{el,Water}}$ (€/kWh)",
-        "c_pipe": r"$C_{\mathrm{pipe}}$ (€/m)",
-        "COP_Air": r"$\mathrm{COP}_{\mathrm{Air}}$",
-        "COP_Water": r"$\mathrm{COP}_{\mathrm{Water}}$",
-        "q_loss": r"$q_{\mathrm{loss}}$ (%)",
-        "hours_Air": r"$h_{\mathrm{Air}}$ (h/a)",
-        "hours_Water": r"$h_{\mathrm{Water}}$ (h/a)",
+    # --- Configuration ---
+    math_labels = {
+        "c_el_L": r"$c_{el,L}$",
+        "c_el_W": r"$c_{el,W}$",
+        "c_pipe": r"$c_{pipe}$",
+        "COP_Water": r"$COP_{Water}$",
+        "COP_Air": r"$COP_{Air}$",
+        "q_loss": r"$q_{loss}$",
+        "CAPEX_Air": r"$CAPEX_{Air}$",
+        "CAPEX_Water": r"$CAPEX_{Water}$",
+        "hours_Air": r"$h_{Air}$",
+        "hours_Water": r"$h_{Water}$",
     }
 
-    # Find base values in results
-    df_base_vals = []
-    for p in plot_params:
-        sub = df_sens[df_sens["parameter"] == p]
+    air_params = ['c_el_L', 'COP_Air', 'CAPEX_Air', 'hours_Air']
+    water_params = ['c_el_W', 'COP_Water', 'CAPEX_Water', 'hours_Water']
+    other_params = ['c_pipe', 'q_loss']
+
+    param_colors = {
+        'c_el_L': '#004d00',
+        'COP_Air': '#1a9641',
+        'CAPEX_Air': '#7bcf74',
+        'hours_Air': '#b8e986',
+        'c_el_W': '#08306b',
+        'COP_Water': '#2171b5',
+        'CAPEX_Water': '#6baed6',
+        'hours_Water': '#9ecae1',
+        'c_pipe': '#2d2d2d',
+        'q_loss': '#888888',
+    }
+
+    # --- Determine baseline utilization ---
+    # Find the utilization value closest to the base parameter values
+    baseline_values = []
+    for param_name, base_val in params_base.items():
+        sub = df_sens[df_sens["parameter"] == param_name]
         if sub.empty:
-            df_base_vals.append(np.nan)
             continue
-        idx = (sub["tested_value"] - params_base[p]).abs().idxmin()
-        df_base_vals.append(sub.loc[idx, "Utilization_TWh"])
+        idx = (sub["tested_value"] - base_val).abs().idxmin()
+        baseline_values.append(sub.loc[idx, "Utilization_GWh"])
 
-    # Assign scenario numbers
-    df = df_sens.copy()
-    df["scenario"] = df.groupby("parameter").cumcount() + 1
+    if baseline_values:
+        baseline = float(np.median(baseline_values))
+    else:
+        baseline = df_sens["Utilization_GWh"].median()
 
-    param_order = {p: i for i, p in enumerate(plot_params)}
-    x_pos = np.arange(len(plot_params))
+    # --- Plot ---
+    from matplotlib.lines import Line2D
 
-    palette = ["#0F5C4B", "#136C57", "#187964", "#1E876F", "#24957B",
-               "#2AA288", "#30B194", "#36BF9F", "#3CCDAA", "#42DBB5"]
+    all_params = df_sens['parameter'].unique()
+    fig, ax = plt.subplots(figsize=(11, 7))
 
-    fig, ax = plt.subplots(figsize=(14, 6))
-    scenarios = sorted(df["scenario"].unique())
+    for param in all_params:
+        subset = df_sens[df_sens['parameter'] == param].copy()
 
-    for i, scen in enumerate(scenarios):
-        sub = df[(df["scenario"] == scen) & (df["parameter"].isin(plot_params))]
-        sub = sub.sort_values("parameter", key=lambda s: s.map(param_order))
-        ax.plot(sub["parameter"].map(param_order).values, sub["Utilization_TWh"],
-                color=palette[i % len(palette)], lw=1.5, marker="o", alpha=1)
+        # Find baseline tested_value for this parameter
+        baseline_idx = (subset['Utilization_GWh'] - baseline).abs().idxmin()
+        baseline_tested = subset.loc[baseline_idx, 'tested_value']
 
-    # Base line
-    ax.plot(x_pos, df_base_vals, color="#f58220", lw=3, marker="o",
-            label="Base values" if cfg.plot_language == "en" else "Basiswerte")
+        # Normalize: % change from baseline
+        subset['x_norm'] = (subset['tested_value'] - baseline_tested) / baseline_tested * 100
+        subset['y_norm'] = (subset['Utilization_GWh'] - baseline) / baseline * 100
 
-    ax.set_ylabel("Economic potential [TWh/a]")
-    ax.set_xlabel("Parameter")
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([param_labels.get(p, p) for p in plot_params], rotation=45, ha="right")
-    ax.grid(True, linestyle="--", alpha=0.4)
+        color = param_colors.get(param, '#333333')
+        ax.scatter(subset['x_norm'], subset['y_norm'], color=color, s=40, zorder=3, alpha=0.85)
+        ax.plot(subset['x_norm'], subset['y_norm'], color=color, linewidth=2.2, alpha=0.85)
 
-    y_min, y_max = df["Utilization_TWh"].min(), df["Utilization_TWh"].max()
-    if np.isfinite(y_min) and np.isfinite(y_max):
-        span = max(1e-9, y_max - y_min)
-        ax.set_ylim(max(0, y_min - 2 * span), y_max + 1.5 * span)
+    ax.axhline(y=0, color='black', linewidth=1, linestyle='-')
+    ax.axvline(x=0, color='black', linewidth=1, linestyle='-')
 
-    ax.legend(loc="upper left", frameon=True)
+    if cfg.plot_language == "en":
+        ax.set_xlabel('Parameter Variation from Baseline [%]', fontsize=12)
+        ax.set_ylabel('Economic Potential Variation from Baseline [%]', fontsize=12)
+    else:
+        ax.set_xlabel('Parametervariation vom Basiswert [%]', fontsize=12)
+        ax.set_ylabel('Wirtschaftliches Potential – Variation vom Basiswert [%]', fontsize=12)
+
+    ax.grid(alpha=0.3)
+
+    # --- Grouped legend ---
+    legend_handles = []
+    legend_labels = []
+
+    # Column 1: Air-source
+    air_title = r'$\bf{Air\text{-}source\ HP}$' if cfg.plot_language == "en" else r'$\bf{Luft\text{-}WP}$'
+    legend_handles.append(Line2D([0], [0], color='none'))
+    legend_labels.append(air_title)
+    for param in air_params:
+        if param in param_colors:
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_labels.append(math_labels.get(param, param))
+
+    # Column 2: Water-source
+    water_title = r'$\bf{Water\text{-}source\ HP}$' if cfg.plot_language == "en" else r'$\bf{Wasser\text{-}WP}$'
+    legend_handles.append(Line2D([0], [0], color='none'))
+    legend_labels.append(water_title)
+    for param in water_params:
+        if param in param_colors:
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_labels.append(math_labels.get(param, param))
+
+    # Column 3: Other
+    other_title = r'$\bf{Other}$' if cfg.plot_language == "en" else r'$\bf{Sonstige}$'
+    legend_handles.append(Line2D([0], [0], color='none'))
+    legend_labels.append(other_title)
+    for param in other_params:
+        if param in param_colors:
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_labels.append(math_labels.get(param, param))
+    # Pad to equal column length
+    max_col_len = max(len(air_params), len(water_params), len(other_params))
+    for _ in range(max_col_len - len(other_params)):
+        legend_handles.append(Line2D([0], [0], color='none'))
+        legend_labels.append('')
+
+    ax.legend(legend_handles, legend_labels, loc='upper center', fontsize=10,
+              framealpha=0.95, ncol=3, columnspacing=2.0, handlelength=1.5,
+              bbox_to_anchor=(0.5, -0.12))
+
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.22)
 
     Path(cfg.economic_sensitivity_plot_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(cfg.economic_sensitivity_plot_path, format="pdf", dpi=300, bbox_inches="tight")
-    plt.savefig(cfg.economic_sensitivity_plot_path.replace(".pdf", ".svg"), bbox_inches="tight")
+    plt.savefig(cfg.economic_sensitivity_plot_path.replace(".pdf", ".svg"), dpi=150, bbox_inches="tight")
     plt.close(fig)
-
+    print(f"  Sensitivity plot saved: {cfg.economic_sensitivity_plot_path}")
 
 # ============================================================
 # Main Entry Point
 # ============================================================
 
 def calculate(cfg):
-    """Full economic potential pipeline."""
+    """Full economic potential pipeline with optional caching."""
 
-    # 1. Calculate EI raster
-    print("  Computing EI raster...")
-    EI, HI, D, heat_data, transform, crs = _calculate_ei_raster(cfg)
+    # 1. Calculate or load EI raster
+    ei_cache_exists = Path(cfg.ei_output_tif).exists()
+
+    if cfg.use_cache and ei_cache_exists:
+        print(f"  [CACHE] Loading existing EI raster: {cfg.ei_output_tif}")
+    else:
+        if cfg.use_cache and not ei_cache_exists:
+            print(f"  [CACHE] EI raster not found, computing fresh...")
+        else:
+            print("  Computing EI raster...")
+        _calculate_ei_raster(cfg)
 
     # 2. Load results & get lake list
     ei_data, hylak_data, dist_data, hub_data, heat_data, transform, crs = _load_ei_results(cfg)
     lakes_gdf = _get_lake_ids(cfg, crs)
 
-    # 3. Per-lake heat aggregation
-    print("  Computing per-lake economic heat demand...")
-    heat_df = _compute_heat_per_lake(cfg, ei_data, hylak_data, heat_data, lakes_gdf)
+    # 3. Per-lake heat aggregation (with cache)
+    compare_cache_exists = Path(cfg.economic_compare_csv).exists()
 
-    # 4. Merge with technical potential → economic potential
-    compare_df = _merge_with_potential(heat_df, cfg)
+    if cfg.use_cache and compare_cache_exists:
+        print(f"  [CACHE] Loading existing economic comparison: {cfg.economic_compare_csv}")
+        compare_df = pd.read_csv(cfg.economic_compare_csv)
+    else:
+        if cfg.use_cache and not compare_cache_exists:
+            print(f"  [CACHE] Economic comparison CSV not found, computing fresh...")
+        else:
+            print("  Computing per-lake economic heat demand...")
+        heat_df = _compute_heat_per_lake(cfg, ei_data, hylak_data, heat_data, lakes_gdf)
+        compare_df = _merge_with_potential(heat_df, cfg)
 
-    # 5. Utilization selection
-    print("  Selecting utilized hubs...")
-    utilized_mask = _select_utilized_hubs(cfg, ei_data, hylak_data, hub_data, heat_data)
+    # 4. Utilization selection (with cache)
+    utilized_cache_path = Path(cfg.utilized_mask_cache_path)
+    utilized_cache_exists = utilized_cache_path.exists()
 
-    # 6. Scatter plot
+    if cfg.use_cache and utilized_cache_exists:
+        print(f"  [CACHE] Loading existing utilization mask: {utilized_cache_path}")
+        utilized_mask = np.load(utilized_cache_path)
+    else:
+        if cfg.use_cache and not utilized_cache_exists:
+            print(f"  [CACHE] Utilization mask not found, computing fresh...")
+        else:
+            print("  Selecting utilized hubs...")
+        utilized_mask = _select_utilized_hubs(cfg, ei_data, hylak_data, hub_data, heat_data)
+        # Save cache
+        utilized_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(utilized_cache_path, utilized_mask)
+        print(f"  Utilization mask cached: {utilized_cache_path}")
+
+    # 5. Scatter plot
     print("  Plotting EI scatter...")
     plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask)
 
-    # 7. Map plot
+    # 6. Map plot
     print("  Plotting economic potential map...")
     plot_map(cfg, compare_df)
 
-    # 8. Sensitivity analysis
+    # 7. Sensitivity analysis (with cache)
     if cfg.run_economic_sensitivity:
-        print("  Running sensitivity analysis...")
-        df_sens, params_base = sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data)
+        sens_csv_path = Path(cfg.economic_sensitivity_plot_path).with_suffix(".csv")
+        sens_cache_exists = sens_csv_path.exists()
+
+        if cfg.use_cache and sens_cache_exists:
+            print(f"  [CACHE] Loading existing sensitivity results: {sens_csv_path}")
+            df_sens = pd.read_csv(sens_csv_path)
+            params_base = {
+                "c_el_L": cfg.c_el_L, "c_el_W": cfg.c_el_W,
+                "c_pipe": cfg.c_pipe, "COP_Water": cfg.COP_Water, "COP_Air": cfg.COP_Air,
+                "q_loss": cfg.q_loss, "CAPEX_Air": cfg.CAPEX_Air, "CAPEX_Water": cfg.CAPEX_Water,
+                "hours_Air": cfg.hours_Air, "hours_Water": cfg.hours_Water,
+            }
+        else:
+            if cfg.use_cache and not sens_cache_exists:
+                print(f"  [CACHE] Sensitivity CSV not found, computing fresh...")
+            else:
+                print("  Running sensitivity analysis...")
+            df_sens, params_base = sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data)
+            sens_csv_path.parent.mkdir(parents=True, exist_ok=True)
+            df_sens.to_csv(sens_csv_path, index=False)
+            print(f"  Sensitivity results cached: {sens_csv_path}")
+
         plot_sensitivity(cfg, df_sens, params_base)
 
     return compare_df

@@ -7,6 +7,8 @@ class Config:
     # Language
     plot_language = "en"
 
+    use_cache = True
+
     # Filter (None = all of Germany)
     nuts1_filter = None
 
@@ -133,3 +135,8 @@ class Config:
     @property
     def economic_sensitivity_plot_path(self):
         return str(Path(self.results_dir) / "Economic_Sensitivity.pdf")
+    
+    @property
+    def utilized_mask_cache_path(self):
+        suffix = f"_{self.nuts1_filter[0]}" if self.nuts1_filter else ""
+        return str(Path(self.processed_dir) / f"utilized_mask{suffix}.npy")
