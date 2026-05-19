@@ -48,18 +48,32 @@ def _rasterize_boundaries(lakes_gdf, shape, transform):
     )
 
 
+def _annuity_factor(wacc, lt):
+    """Compute annuity factor for given WACC and lifetime."""
+    if wacc == 0:
+        return 1.0 / lt
+    return wacc * (1 + wacc) ** lt / ((1 + wacc) ** lt - 1)
+
+
+def _pv_factor(wacc, lt):
+    """Present value factor for uniform annual payments: sum_{t=1}^{lt} 1/(1+wacc)^t."""
+    if wacc == 0:
+        return float(lt)
+    return (1 - (1 + wacc) ** (-lt)) / wacc
+
+
+def _discounted_op_cost(c_el, E_h, COP, wacc, lt):
+    """Compute present value of annual operation costs discounted with WACC."""
+    annual_cost = c_el * E_h / COP
+    return annual_cost * _pv_factor(wacc, lt)
+
+
 # ============================================================
 # Core EI Calculation
 # ============================================================
 
 def _calculate_ei_raster(cfg):
     """Compute Economic Index raster. Returns arrays + metadata."""
-
-    def _discounted_op_cost(c_el, E_h, COP, infl, lt):
-        total = 0.0
-        for year in range(1, int(lt) + 1):
-            total += (c_el * E_h / COP) / ((1 + infl) ** year)
-        return total
 
     # Load heat raster
     with rasterio.open(cfg.heat_path) as src:
@@ -162,18 +176,34 @@ def _calculate_ei_raster(cfg):
     ).astype("float32")
     mask_valid = np.isfinite(D) & (HI > 0)
 
-    # --- EI Calculation ---
+    # --- EI Calculation (with separate WACC for decentral/central) ---
     E_h_L = E_h_kWh[mask_valid]
     E_h_W = E_h_kWh[mask_valid] * (1 + cfg.q_loss)
 
-    disc_Air = _discounted_op_cost(cfg.c_el_L, E_h_L, cfg.COP_Air, cfg.inflation_rate, cfg.lifetime)
-    disc_Water = _discounted_op_cost(cfg.c_el_W, E_h_W, cfg.COP_Water, cfg.inflation_rate, cfg.lifetime)
+    # Separate annuity factors
+    ann_d = _annuity_factor(cfg.wacc_decentral, cfg.lifetime)
+    ann_c = _annuity_factor(cfg.wacc_central, cfg.lifetime)
 
-    numerator = (
-        (cfg.CAPEX_Air * (E_h_L / cfg.hours_Air)) + disc_Air
-        - (cfg.CAPEX_Water * (E_h_W / cfg.hours_Water)) - disc_Water
+    # Present value of annual operation costs (each with own WACC)
+    disc_Air = _discounted_op_cost(
+        cfg.c_el_L, E_h_L, cfg.COP_Air, cfg.wacc_decentral, cfg.lifetime
     )
-    denominator = cfg.c_pipe * D[mask_valid].astype("float64")
+    disc_Water = _discounted_op_cost(
+        cfg.c_el_W, E_h_W, cfg.COP_Water, cfg.wacc_central, cfg.lifetime
+    )
+
+    # Annualized CAPEX (capacity = E_h / full_load_hours)
+    capex_ann_Air = ann_d * cfg.CAPEX_Air * (E_h_L / cfg.hours_Air)
+    capex_ann_Water = ann_c * cfg.CAPEX_Water * (E_h_W / cfg.hours_Water)
+
+    # Numerator: cost savings of central vs. decentral (annualized)
+    numerator = (
+        capex_ann_Air + disc_Air
+        - capex_ann_Water - disc_Water
+    )
+
+    # Denominator: annualized pipe investment per meter (central WACC)
+    denominator = ann_c * cfg.c_pipe * D[mask_valid].astype("float64")
     denominator = np.where(denominator == 0, np.nan, denominator)
     EI[mask_valid] = numerator / denominator
 
@@ -392,13 +422,7 @@ def _select_utilized_hubs(cfg, ei_data, hylak_data, hub_data, heat_data):
 # ============================================================
 
 def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
-    """Vary EI parameters and compute resulting economic potential."""
-
-    def _discounted(c_el, E_h, COP):
-        total = 0.0
-        for yr in range(1, cfg.lifetime + 1):
-            total += (c_el * E_h / COP) / ((1 + cfg.inflation_rate) ** yr)
-        return total
+    """Vary EI parameters (incl. separate WACCs) and compute resulting economic potential."""
 
     mask_base = np.isfinite(dist_data) & (hylak_data > 0) & np.isfinite(heat_data) & (heat_data > 0)
     E_h_base = heat_data[mask_base].astype("float64") * 1000.0
@@ -417,6 +441,8 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
         "c_pipe": cfg.c_pipe, "COP_Water": cfg.COP_Water, "COP_Air": cfg.COP_Air,
         "q_loss": cfg.q_loss, "CAPEX_Air": cfg.CAPEX_Air, "CAPEX_Water": cfg.CAPEX_Water,
         "hours_Air": cfg.hours_Air, "hours_Water": cfg.hours_Water,
+        "wacc_decentral": cfg.wacc_decentral,
+        "wacc_central": cfg.wacc_central,
     }
 
     results = []
@@ -431,14 +457,31 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
             p = params_base.copy()
             p[param_name] = float(val)
 
-            E_h_W = E_h_base * (1 + p["q_loss"])
-            disc_A = _discounted(p["c_el_L"], E_h_base, p["COP_Air"])
-            disc_W = _discounted(p["c_el_W"], E_h_W, p["COP_Water"])
+            # Compute annuity factors with respective WACCs
+            ann_d = _annuity_factor(p["wacc_decentral"], cfg.lifetime)
+            ann_c = _annuity_factor(p["wacc_central"], cfg.lifetime)
 
-            num = ((p["CAPEX_Air"] * E_h_base / p["hours_Air"]) + disc_A
-                   - (p["CAPEX_Water"] * E_h_W / p["hours_Water"]) - disc_W)
-            den = np.where(p["c_pipe"] * D_base == 0, np.nan, p["c_pipe"] * D_base)
+            E_h_W = E_h_base * (1 + p["q_loss"])
+
+            # PV of operation costs (each discounted with own WACC)
+            disc_A = _discounted_op_cost(
+                p["c_el_L"], E_h_base, p["COP_Air"],
+                p["wacc_decentral"], cfg.lifetime
+            )
+            disc_W = _discounted_op_cost(
+                p["c_el_W"], E_h_W, p["COP_Water"],
+                p["wacc_central"], cfg.lifetime
+            )
+
+            # Annualized CAPEX
+            capex_ann_Air = ann_d * p["CAPEX_Air"] * E_h_base / p["hours_Air"]
+            capex_ann_Water = ann_c * p["CAPEX_Water"] * E_h_W / p["hours_Water"]
+
+            num = capex_ann_Air + disc_A - capex_ann_Water - disc_W
+            den = ann_c * p["c_pipe"] * D_base
+            den = np.where(den == 0, np.nan, den)
             EI_var = num / den
+
             mask_ei = EI_var >= cfg.ei_threshold
 
             if np.any(mask_ei):
@@ -457,6 +500,70 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
     return df, params_base
 
 
+# ============================================================
+# Base Case Summary
+# ============================================================
+
+def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
+    """Print a comprehensive summary of the economic potential base case."""
+
+    total_covered_GWh = compare_df["Covered_Heat_GWh"].sum()
+    total_covered_TWh = total_covered_GWh / 1000.0
+    total_demand_GWh = compare_df["Heat_EI_ge1_GWh"].sum()
+    total_technical_GWh = compare_df["technical_extractable_Thermal_Potential_GWh"].sum()
+
+    n_lakes_total = len(compare_df)
+    n_lakes_with_potential = int((compare_df["Covered_Heat_GWh"] > 0).sum())
+    n_lakes_demand_limited = int(
+        ((compare_df["Covered_Heat_GWh"] == compare_df["Heat_EI_ge1_GWh"])
+         & (compare_df["Covered_Heat_GWh"] > 0)).sum()
+    )
+
+    # EI statistics
+    mask_valid_ei = np.isfinite(ei_data) & (hylak_data > 0) & np.isfinite(heat_data) & (heat_data > 0)
+    ei_valid = ei_data[mask_valid_ei]
+    n_pixels_ei_ge1 = int((ei_valid >= cfg.ei_threshold).sum())
+    n_pixels_total = int(mask_valid_ei.sum())
+    ei_median = float(np.nanmedian(ei_valid)) if ei_valid.size > 0 else 0.0
+    ei_mean = float(np.nanmean(ei_valid)) if ei_valid.size > 0 else 0.0
+
+    # Top lakes
+    top_lakes = compare_df.nlargest(5, "Covered_Heat_GWh")[
+        ["Hylak_id", "Heat_EI_ge1_GWh", "technical_extractable_Thermal_Potential_GWh", "Covered_Heat_GWh"]
+    ]
+
+    print("\n" + "=" * 65)
+    print("  ECONOMIC POTENTIAL – BASE CASE SUMMARY")
+    print("=" * 65)
+    print(f"  WACC decentral (air-source HP):   {cfg.wacc_decentral * 100:.1f} %")
+    print(f"  WACC central (water-source HP):   {cfg.wacc_central * 100:.1f} %")
+    print(f"  Lifetime:                         {cfg.lifetime} years")
+    print(f"  EI threshold:                     {cfg.ei_threshold}")
+    print(f"  Max pipe distance:                {cfg.ei_max_dist_m:,.0f} m")
+    print("-" * 65)
+    print(f"  Total economic potential:         {total_covered_TWh:.2f} TWh/yr")
+    print(f"                                    ({total_covered_GWh:,.0f} GWh/yr)")
+    print(f"  Total heat demand (EI≥{cfg.ei_threshold}):      {total_demand_GWh / 1000:.2f} TWh/yr")
+    print(f"  Total technical potential:        {total_technical_GWh / 1000:.2f} TWh/yr")
+    print("-" * 65)
+    print(f"  Lakes total:                      {n_lakes_total}")
+    print(f"  Lakes with economic potential:    {n_lakes_with_potential}")
+    print(f"  Lakes demand-limited:             {n_lakes_demand_limited}")
+    if n_pixels_total > 0:
+        print(f"  Pixels with EI ≥ {cfg.ei_threshold}:             {n_pixels_ei_ge1:,} / {n_pixels_total:,} "
+              f"({n_pixels_ei_ge1 / n_pixels_total * 100:.1f}%)")
+    print(f"  EI mean (valid pixels):           {ei_mean:.2f}")
+    print(f"  EI median (valid pixels):         {ei_median:.2f}")
+    print("-" * 65)
+    print("  Top 5 lakes by economic potential:")
+    print(f"  {'Hylak_id':>10} {'Demand GWh':>12} {'Tech. Pot. GWh':>15} {'Econ. Pot. GWh':>15}")
+    for _, row in top_lakes.iterrows():
+        print(f"  {int(row['Hylak_id']):>10} {row['Heat_EI_ge1_GWh']:>12.1f} "
+              f"{row['technical_extractable_Thermal_Potential_GWh']:>15.1f} "
+              f"{row['Covered_Heat_GWh']:>15.1f}")
+    print("=" * 65 + "\n")
+
+    
 # ============================================================
 # Plots
 # ============================================================
@@ -673,10 +780,12 @@ def plot_sensitivity(cfg, df_sens, params_base):
         "CAPEX_Water": r"$CAPEX_{Water}$",
         "hours_Air": r"$h_{Air}$",
         "hours_Water": r"$h_{Water}$",
+        "wacc_decentral": r"$WACC_{dec}$",
+        "wacc_central": r"$WACC_{cen}$",
     }
 
-    air_params = ['c_el_L', 'COP_Air', 'CAPEX_Air', 'hours_Air']
-    water_params = ['c_el_W', 'COP_Water', 'CAPEX_Water', 'hours_Water']
+    air_params = ['c_el_L', 'COP_Air', 'CAPEX_Air', 'hours_Air', 'wacc_decentral']
+    water_params = ['c_el_W', 'COP_Water', 'CAPEX_Water', 'hours_Water', 'wacc_central']
     other_params = ['c_pipe', 'q_loss']
 
     param_colors = {
@@ -684,16 +793,17 @@ def plot_sensitivity(cfg, df_sens, params_base):
         'COP_Air': '#1a9641',
         'CAPEX_Air': '#7bcf74',
         'hours_Air': '#b8e986',
+        'wacc_decentral': '#556b2f',
         'c_el_W': '#08306b',
         'COP_Water': '#2171b5',
         'CAPEX_Water': '#6baed6',
         'hours_Water': '#9ecae1',
+        'wacc_central': '#d62728',
         'c_pipe': '#2d2d2d',
         'q_loss': '#888888',
     }
 
     # --- Determine baseline utilization ---
-    # Find the utilization value closest to the base parameter values
     baseline_values = []
     for param_name, base_val in params_base.items():
         sub = df_sens[df_sens["parameter"] == param_name]
@@ -721,7 +831,10 @@ def plot_sensitivity(cfg, df_sens, params_base):
         baseline_tested = subset.loc[baseline_idx, 'tested_value']
 
         # Normalize: % change from baseline
-        subset['x_norm'] = (subset['tested_value'] - baseline_tested) / baseline_tested * 100
+        if baseline_tested != 0:
+            subset['x_norm'] = (subset['tested_value'] - baseline_tested) / abs(baseline_tested) * 100
+        else:
+            subset['x_norm'] = 0.0
         subset['y_norm'] = (subset['Utilization_GWh'] - baseline) / baseline * 100
 
         color = param_colors.get(param, '#333333')
@@ -744,8 +857,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
     legend_handles = []
     legend_labels = []
 
-    # Column 1: Air-source
-    air_title = r'$\bf{Air\text{-}source\ HP}$' if cfg.plot_language == "en" else r'$\bf{Luft\text{-}WP}$'
+    # Column 1: Air-source / decentral
+    air_title = (r'$\bf{Air\text{-}source\ HP}$' if cfg.plot_language == "en"
+                 else r'$\bf{Luft\text{-}WP\ (dezentral)}$')
     legend_handles.append(Line2D([0], [0], color='none'))
     legend_labels.append(air_title)
     for param in air_params:
@@ -753,8 +867,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
             legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
             legend_labels.append(math_labels.get(param, param))
 
-    # Column 2: Water-source
-    water_title = r'$\bf{Water\text{-}source\ HP}$' if cfg.plot_language == "en" else r'$\bf{Wasser\text{-}WP}$'
+    # Column 2: Water-source / central
+    water_title = (r'$\bf{Water\text{-}source\ HP}$' if cfg.plot_language == "en"
+                   else r'$\bf{Wasser\text{-}WP\ (zentral)}$')
     legend_handles.append(Line2D([0], [0], color='none'))
     legend_labels.append(water_title)
     for param in water_params:
@@ -781,13 +896,14 @@ def plot_sensitivity(cfg, df_sens, params_base):
               bbox_to_anchor=(0.5, -0.12))
 
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.22)
+    plt.subplots_adjust(bottom=0.24)
 
     Path(cfg.economic_sensitivity_plot_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(cfg.economic_sensitivity_plot_path, format="pdf", dpi=300, bbox_inches="tight")
     plt.savefig(cfg.economic_sensitivity_plot_path.replace(".pdf", ".svg"), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Sensitivity plot saved: {cfg.economic_sensitivity_plot_path}")
+
 
 # ============================================================
 # Main Entry Point
@@ -826,7 +942,10 @@ def calculate(cfg):
         heat_df = _compute_heat_per_lake(cfg, ei_data, hylak_data, heat_data, lakes_gdf)
         compare_df = _merge_with_potential(heat_df, cfg)
 
-    # 4. Utilization selection (with cache)
+    # 4. Base Case Summary Output
+    _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data)
+
+    # 5. Utilization selection (with cache)
     utilized_cache_path = Path(cfg.utilized_mask_cache_path)
     utilized_cache_exists = utilized_cache_path.exists()
 
@@ -844,15 +963,15 @@ def calculate(cfg):
         np.save(utilized_cache_path, utilized_mask)
         print(f"  Utilization mask cached: {utilized_cache_path}")
 
-    # 5. Scatter plot
+    # 6. Scatter plot
     print("  Plotting EI scatter...")
     plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask)
 
-    # 6. Map plot
+    # 7. Map plot
     print("  Plotting economic potential map...")
     plot_map(cfg, compare_df)
 
-    # 7. Sensitivity analysis (with cache)
+    # 8. Sensitivity analysis (with cache)
     if cfg.run_economic_sensitivity:
         sens_csv_path = Path(cfg.economic_sensitivity_plot_path).with_suffix(".csv")
         sens_cache_exists = sens_csv_path.exists()
@@ -865,6 +984,8 @@ def calculate(cfg):
                 "c_pipe": cfg.c_pipe, "COP_Water": cfg.COP_Water, "COP_Air": cfg.COP_Air,
                 "q_loss": cfg.q_loss, "CAPEX_Air": cfg.CAPEX_Air, "CAPEX_Water": cfg.CAPEX_Water,
                 "hours_Air": cfg.hours_Air, "hours_Water": cfg.hours_Water,
+                "wacc_decentral": cfg.wacc_decentral,
+                "wacc_central": cfg.wacc_central,
             }
         else:
             if cfg.use_cache and not sens_cache_exists:

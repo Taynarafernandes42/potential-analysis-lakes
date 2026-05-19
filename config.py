@@ -56,6 +56,8 @@ class Config:
     COP_Air = 2.9
     q_loss = 0.12           # heat loss fraction in pipe network
     inflation_rate = 0.02
+    wacc_decentral = 0.022
+    wacc_central = 0.05
 
     CAPEX_Air = 1872.0      # €/kWth
     CAPEX_Water = 1064.0    # €/kWth
