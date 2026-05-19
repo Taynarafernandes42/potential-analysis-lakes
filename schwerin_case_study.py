@@ -4,7 +4,7 @@ Combined Analysis: Lake Thermal Potential vs. District Heating Demand
 1. Technical potential (water side) – static & dynamic
 2. Heating demand profile (BDEW) scaled to static potential
 3. Overlay plot for a year with outages
-4. Monthly coverage heatmap (all years)
+4. Daily coverage heatmap (all years)
 5. Hourly deficit heatmap (all years)
 """
 
@@ -61,11 +61,17 @@ STATE = "MV"
 
 # Plot style
 plt.rcParams.update({
-    "font.size": 11,
+    "font.size": 18,
     "font.family": "serif",
     "mathtext.fontset": "cm",
     "axes.grid": True,
     "grid.alpha": 0.3,
+    "axes.titlesize": 20,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 16,
+    "ytick.labelsize": 16,
+    "legend.fontsize": 16,
+    "figure.titlesize": 20,
 })
 
 
@@ -373,93 +379,133 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     potential_kW = pot_yr["capacity_kW"].values
     demand_kW = dem_yr.values
 
+    # --- Distinct color palette ---
+    COLOR_LAKE_TEMP = "#1f4e79"       # dark navy blue
+    COLOR_TMIN_LINE = "#c00000"       # strong red
+    COLOR_DELTA_T = "#ff8c00"         # amber/orange
+    COLOR_POTENTIAL = "#008080"       # teal
+    COLOR_DEMAND = "#8b0000"          # dark red
+    COLOR_DEFICIT = "#ff4444"         # bright red
+    COLOR_COVERAGE = "#6a0dad"        # purple
+    COLOR_BALANCE_POS = "#228b22"     # forest green
+    COLOR_BALANCE_NEG = "#dc143c"     # crimson
+
     # --- PLOT 1: Time series overlay ---
-    fig, axes = plt.subplots(4, 1, figsize=(16, 16), sharex=True,
+    fig, axes = plt.subplots(4, 1, figsize=(16, 18), sharex=True,
                              gridspec_kw={"height_ratios": [1.8, 2.5, 1.5, 1.2]})
 
-    # Panel 1: Lake temperature and delta T at heat exchanger
+    # ----------------------------------------------------------------
+    # Panel A: Lake temperature and delta T at heat exchanger
+    # ----------------------------------------------------------------
     ax = axes[0]
     ax2 = ax.twinx()
 
     # Lake temperature on left axis
-    ln1 = ax.plot(hoy, pot_yr["temp_C"].values, lw=0.8, color="steelblue",
-                  label="Lake temperature (13.5 m)")
-    ax.axhline(T_MIN_EXTRACTION, color="red", ls="--", lw=1.5,
-               label=f"T_min extraction = {T_MIN_EXTRACTION} °C")
-    ax.axhline(T_MIN_EXTRACTION + DELTA_T_HEX_MAX, color="orange", ls="--", lw=1,
-               label=f"Full dT threshold = {T_MIN_EXTRACTION + DELTA_T_HEX_MAX} °C")
+    ax.plot(hoy, pot_yr["temp_C"].values, lw=1.8, color=COLOR_LAKE_TEMP,
+            label="Lake temperature", zorder=3)
+    ax.axhline(T_MIN_EXTRACTION, color=COLOR_TMIN_LINE, ls="--", lw=2.0,
+               label=f"$T_{{min}}$ = {T_MIN_EXTRACTION} °C", zorder=2)
     ax.fill_between(hoy, 0, pot_yr["temp_C"].max() * 1.1,
                     where=~pot_yr["extractable"].values,
-                    color="red", alpha=0.08, step="mid")
+                    color="red", alpha=0.06, step="mid")
+
+    # Left axis limits
+    y_max_left = pot_yr["temp_C"].max() * 1.15
+    y_min_left = 0.0
+    ax.set_ylim(y_min_left, y_max_left)
     ax.set_ylabel("Lake Temperature [°C]")
-    ax.set_ylim(bottom=0)
 
     # Delta T at heat exchanger on right axis
-    ln2 = ax2.plot(hoy, pot_yr["deltaT_hex"].values, lw=0.6, color="darkorange",
-                   alpha=0.8, label=r"$\Delta T_{HEX}$ (effective)")
-    ax2.axhline(DELTA_T_HEX_MAX, color="darkorange", ls=":", lw=1.2,
-                label=f"Max dT_HEX = {DELTA_T_HEX_MAX} K")
-    ax2.set_ylabel(r"$\Delta T_{HEX}$ [K]", color="darkorange")
-    ax2.tick_params(axis="y", labelcolor="darkorange")
-    ax2.set_ylim(0, DELTA_T_HEX_MAX * 1.3)
+    ax2.plot(hoy, pot_yr["deltaT_hex"].values, lw=1.4, color=COLOR_DELTA_T,
+             alpha=0.9, label=r"$\Delta T_{HEX}$", zorder=2)
+
+    # --- Align right axis 0 with left axis T_MIN_EXTRACTION (3°C) ---
+    frac_3C = (T_MIN_EXTRACTION - y_min_left) / (y_max_left - y_min_left)
+    y_max_right = DELTA_T_HEX_MAX * 1.4
+    y_min_right = -frac_3C * y_max_right / (1.0 - frac_3C)
+    ax2.set_ylim(y_min_right, y_max_right)
+
+    ax2.set_ylabel(r"$\Delta T_{HEX}$ [K]", color=COLOR_DELTA_T)
+    ax2.tick_params(axis="y", labelcolor=COLOR_DELTA_T)
 
     # Combined legend
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=9)
+    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 
     ax.set_title(
-        f"Lake Schwerin - Thermal Potential vs. Heating Demand ({selected_year})",
-        fontsize=12,
+        f"Lake Schwerin \u2013 Thermal Potential vs. Heating Demand ({selected_year})",
+        fontweight="bold",
     )
 
-    # Panel 2: Potential vs Demand
+    # Subplot label (A)
+    ax.text(-0.02, 1.05, "A", transform=ax.transAxes,
+            fontsize=22, fontweight="bold", va="bottom", ha="right")
+
+    # ----------------------------------------------------------------
+    # Panel B: Potential vs Demand
+    # ----------------------------------------------------------------
     ax = axes[1]
-    ax.fill_between(hoy, potential_kW / 1000, color="teal", alpha=0.4, lw=0,
+    ax.fill_between(hoy, potential_kW / 1000, color=COLOR_POTENTIAL, alpha=0.45, lw=0,
                     label=f"Lake thermal potential (peak: {potential_kW.max()/1000:.2f} MW)")
-    ax.plot(hoy, demand_kW / 1000, lw=0.4, color="firebrick",
+    ax.plot(hoy, demand_kW / 1000, lw=0.6, color=COLOR_DEMAND,
             label=f"Heating demand (peak: {demand_kW.max()/1000:.2f} MW)")
-    ax.fill_between(hoy, 0, potential_kW.max() / 1000 * 1.2,
-                    where=~pot_yr["extractable"].values,
-                    color="red", alpha=0.08, step="mid", label="Outage zone")
 
     # Mark deficit zones (demand > potential)
     deficit_mask = demand_kW > potential_kW
     if deficit_mask.any():
         ax.fill_between(hoy, potential_kW / 1000, demand_kW / 1000,
                         where=deficit_mask,
-                        color="red", alpha=0.3, interpolate=True,
+                        color=COLOR_DEFICIT, alpha=0.45, interpolate=True,
                         label=f"Deficit ({deficit_mask.sum()} h)")
 
     ax.set_ylabel("Power [MW]")
-    ax.legend(loc="upper right", fontsize=9)
+    ax.legend(loc="upper right")
     ax.set_ylim(bottom=0)
 
-    # Panel 3: Surplus / Deficit
+    # Subplot label (B)
+    ax.text(-0.02, 1.05, "B", transform=ax.transAxes,
+            fontsize=22, fontweight="bold", va="bottom", ha="right")
+
+    # ----------------------------------------------------------------
+    # Panel C: Surplus / Deficit
+    # ----------------------------------------------------------------
     ax = axes[2]
     balance_kW = potential_kW - demand_kW
     surplus = np.where(balance_kW > 0, balance_kW, 0) / 1000
     deficit = np.where(balance_kW < 0, balance_kW, 0) / 1000
 
-    ax.fill_between(hoy, surplus, color="green", alpha=0.4, lw=0, label="Surplus")
-    ax.fill_between(hoy, deficit, color="red", alpha=0.4, lw=0, label="Deficit")
-    ax.axhline(0, color="black", lw=0.8)
-    ax.set_ylabel("Balance [MW]\n(Potential - Demand)")
-    ax.legend(loc="upper right", fontsize=9)
+    ax.fill_between(hoy, surplus, color=COLOR_BALANCE_POS, alpha=0.5, lw=0,
+                    label="Surplus")
+    ax.fill_between(hoy, deficit, color=COLOR_BALANCE_NEG, alpha=0.5, lw=0,
+                    label="Deficit")
+    ax.axhline(0, color="black", lw=1.0)
+    ax.set_ylabel("Balance [MW]\n(Potential \u2212 Demand)")
+    ax.legend(loc="upper right")
 
-    # Panel 4: Coverage ratio
+    # Subplot label (C)
+    ax.text(-0.02, 1.05, "C", transform=ax.transAxes,
+            fontsize=22, fontweight="bold", va="bottom", ha="right")
+
+    # ----------------------------------------------------------------
+    # Panel D: Coverage ratio
+    # ----------------------------------------------------------------
     ax = axes[3]
     with np.errstate(divide="ignore", invalid="ignore"):
         coverage = np.where(demand_kW > 0, potential_kW / demand_kW * 100, 100)
     coverage = np.clip(coverage, 0, 300)
-    ax.plot(hoy, coverage, lw=0.4, color="purple")
-    ax.axhline(100, color="black", ls="--", lw=1.5, label="100% coverage")
+    ax.plot(hoy, coverage, lw=0.5, color=COLOR_COVERAGE)
+    ax.axhline(100, color="black", ls="--", lw=2.0, label="100% coverage")
     ax.fill_between(hoy, 0, coverage, where=coverage < 100,
-                    color="red", alpha=0.15, interpolate=True)
+                    color=COLOR_DEFICIT, alpha=0.15, interpolate=True)
     ax.set_ylabel("Coverage [%]")
     ax.set_xlabel("Hour of Year")
     ax.set_ylim(0, 300)
-    ax.legend(loc="upper right", fontsize=9)
+    ax.legend(loc="upper right")
+
+    # Subplot label (D)
+    ax.text(-0.02, 1.05, "D", transform=ax.transAxes,
+            fontsize=22, fontweight="bold", va="bottom", ha="right")
 
     set_month_xaxis(axes)
     plt.tight_layout()
@@ -487,17 +533,17 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
     ax.bar(months - width / 2, monthly_pot.values, width,
-           color="teal", edgecolor="k", lw=0.3, alpha=0.8,
+           color=COLOR_POTENTIAL, edgecolor="k", lw=0.3, alpha=0.85,
            label="Lake potential")
     ax.bar(months + width / 2, monthly_dem.values, width,
-           color="firebrick", edgecolor="k", lw=0.3, alpha=0.8,
+           color=COLOR_DEMAND, edgecolor="k", lw=0.3, alpha=0.85,
            label="Heating demand")
 
     ax.set_xticks(months)
     ax.set_xticklabels(month_labels)
     ax.set_ylabel("Energy [GWh/month]")
     ax.set_xlabel("Month")
-    ax.set_title(f"Monthly Energy Balance - Potential vs. Demand ({selected_year})")
+    ax.set_title(f"Monthly Energy Balance \u2013 Potential vs. Demand ({selected_year})")
     ax.legend(loc="upper right")
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / f"monthly_balance_{selected_year}.svg",
@@ -536,111 +582,13 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
 
 # ============================================================
-# STEP 6: HEATMAP – Monthly Energy Coverage [%] (all years, capped at 100%)
-# ============================================================
-
-def plot_monthly_coverage_heatmap(df_hourly, demand_series, common_years):
-    """Heatmap: monthly energy coverage (potential/demand) over all years, capped at 100%."""
-    print("\n" + "=" * 60)
-    print("  STEP 6: HEATMAP - Monthly Energy Coverage")
-    print("=" * 60)
-
-    month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-    # Build matrix: rows = years, cols = months
-    coverage_matrix_raw = np.full((len(common_years), 12), np.nan)
-
-    for i, year in enumerate(common_years):
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
-            continue
-
-        n = min(len(pot_yr), len(dem_yr), 8760)
-        pot_kW = pot_yr["capacity_kW"].values[:n]
-        dem_kW = dem_yr.values[:n]
-        months = pot_yr.index[:n].month
-
-        for m in range(1, 13):
-            mask_m = months == m
-            pot_month_kWh = pot_kW[mask_m].sum()
-            dem_month_kWh = dem_kW[mask_m].sum()
-
-            if dem_month_kWh > 0:
-                coverage_matrix_raw[i, m - 1] = pot_month_kWh / dem_month_kWh * 100
-            else:
-                coverage_matrix_raw[i, m - 1] = 100.0
-
-    # Cap at 100%
-    coverage_matrix = np.clip(coverage_matrix_raw, 0, 100)
-
-    # --- Plot ---
-    fig, ax = plt.subplots(figsize=(12, max(6, len(common_years) * 0.4)))
-
-    cmap = plt.cm.RdYlGn
-    norm = Normalize(vmin=0, vmax=100)
-
-    im = ax.imshow(coverage_matrix, aspect="auto", cmap=cmap, norm=norm,
-                   interpolation="nearest")
-
-    # Annotate cells with values
-    for i in range(len(common_years)):
-        for j in range(12):
-            val = coverage_matrix[i, j]
-            raw_val = coverage_matrix_raw[i, j]
-            if not np.isnan(val):
-                display_str = f"{raw_val:.0f}" if raw_val <= 100 else "100"
-                text_color = "white" if val < 40 else "black"
-                ax.text(j, i, display_str, ha="center", va="center",
-                        fontsize=8, color=text_color, fontweight="bold")
-
-    ax.set_xticks(range(12))
-    ax.set_xticklabels(month_labels)
-    ax.set_yticks(range(len(common_years)))
-    ax.set_yticklabels([str(y) for y in common_years])
-    ax.set_xlabel("Month")
-    ax.set_ylabel("Year")
-    ax.set_title(
-        "Monthly Energy Coverage: Lake Potential / Heating Demand [%]",
-        fontsize=12,
-    )
-
-    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Coverage [%]")
-    cbar.set_ticks([0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "heatmap_monthly_coverage_all_years.svg",
-                bbox_inches="tight")
-    plt.close(fig)
-    print(f"  > Plot saved: heatmap_monthly_coverage_all_years.svg")
-
-    # Print summary table
-    print(f"\n  {'Year':<6}", end="")
-    for ml in month_labels:
-        print(f"{ml:<6}", end="")
-    print(f"{'Mean':<6}")
-    print(f"  {'-' * 84}")
-    for i, year in enumerate(common_years):
-        print(f"  {year:<6}", end="")
-        for j in range(12):
-            val = coverage_matrix_raw[i, j]
-            print(f"{val:<6.0f}" if not np.isnan(val) else f"{'--':<6}", end="")
-        row_mean = np.nanmean(coverage_matrix_raw[i, :])
-        print(f"{row_mean:<6.0f}")
-
-    return coverage_matrix_raw
-
-# ============================================================
-# STEP 6b: HEATMAP – Daily Energy Coverage [%] (all years)
+# STEP 6: HEATMAP – Daily Energy Coverage [%] (all years)
 # ============================================================
 
 def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
     """Heatmap: daily energy coverage (potential/demand) over all years, capped at 100%."""
     print("\n" + "=" * 60)
-    print("  STEP 6b: HEATMAP - Daily Energy Coverage (all years)")
+    print("  STEP 6: HEATMAP - Daily Energy Coverage (all years)")
     print("=" * 60)
 
     n_days = 365
@@ -701,10 +649,7 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
 
     ax.set_xlabel("Day of Year")
     ax.set_ylabel("Year")
-    ax.set_title(
-        "Daily Energy Coverage: Lake Potential / Heating Demand [%]",
-        fontsize=12,
-    )
+    ax.set_title("Daily Energy Coverage: Lake Potential / Heating Demand [%]")
 
     cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Coverage [%]")
@@ -745,7 +690,6 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
     """
     Heatmap: hourly unmet demand (deficit) over all years.
     Deficit = max(0, demand - potential).
-    If potential >= demand -> deficit = 0 (fully supplied, shown green).
     Colormap: green (no deficit) -> red (high deficit).
     """
     print("\n" + "=" * 60)
@@ -782,15 +726,15 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
 
     # Custom green-to-red colormap
     colors_list = [
-        (0.0, "#1a9641"),    # dark green (no deficit)
-        (0.001, "#1a9641"),  # keep green for zero
-        (0.01, "#a6d96a"),   # light green
-        (0.15, "#d9ef8b"),   # yellow-green
-        (0.3, "#fee08b"),    # light yellow
-        (0.5, "#fdae61"),    # orange
-        (0.7, "#f46d43"),    # red-orange
-        (0.85, "#d73027"),   # red
-        (1.0, "#67001f"),    # dark red (high deficit)
+        (0.0, "#1a9641"),
+        (0.001, "#1a9641"),
+        (0.01, "#a6d96a"),
+        (0.15, "#d9ef8b"),
+        (0.3, "#fee08b"),
+        (0.5, "#fdae61"),
+        (0.7, "#f46d43"),
+        (0.85, "#d73027"),
+        (1.0, "#67001f"),
     ]
     cmap_gr = LinearSegmentedColormap.from_list(
         "green_to_red",
@@ -823,10 +767,7 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
 
     ax.set_xlabel("Hour of Year")
     ax.set_ylabel("Year")
-    ax.set_title(
-        "Hourly Power Deficit: Unmet Heating Demand [MW]",
-        fontsize=12,
-    )
+    ax.set_title("Hourly Power Deficit: Unmet Heating Demand [MW]")
 
     cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02, extend="max")
     cbar.set_label("Deficit [MW]")
@@ -934,8 +875,8 @@ def main():
     # =========================================================
     # STEP 4: Generate demand profile using fixed economic potential
     # =========================================================
-    ANNUAL_DEMAND_TOTAL_KWH = 97.5711875 * 1e6 
-    Installed_Capacity= ANNUAL_DEMAND_TOTAL_KWH / cfg.hours_Water
+    ANNUAL_DEMAND_TOTAL_KWH = 97.5711875 * 1e6
+    Installed_Capacity = ANNUAL_DEMAND_TOTAL_KWH / cfg.hours_Water
     print(f"\n  >>> Setting ANNUAL_DEMAND_TOTAL_KWH = Fixed Economic Potential = "
           f"{ANNUAL_DEMAND_TOTAL_KWH:,.0f} kWh ({ANNUAL_DEMAND_TOTAL_KWH/1e6:.3f} GWh)")
     print(f"  >>> Corresponding Installed Capacity: {Installed_Capacity/1e3:.3f} MW")
@@ -944,7 +885,7 @@ def main():
         ANNUAL_DEMAND_TOTAL_KWH, df_air, common_years
     )
 
-        # =========================================================
+    # =========================================================
     # CAP: Limit hourly lake potential at installed capacity
     # =========================================================
     Installed_Capacity_kW = Installed_Capacity  # already in kW
@@ -985,14 +926,7 @@ def main():
     results = plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     # =========================================================
-    # STEP 6: Heatmap - Monthly coverage all years
-    # =========================================================
-    coverage_matrix = plot_monthly_coverage_heatmap(
-        df_hourly, demand_series, common_years
-    )
-
-    # =========================================================
-    # STEP 6b: Heatmap - Daily coverage all years
+    # STEP 6: Heatmap - Daily coverage all years
     # =========================================================
     daily_coverage_matrix = plot_daily_coverage_heatmap(
         df_hourly, demand_series, common_years
@@ -1005,7 +939,7 @@ def main():
         df_hourly, demand_series, common_years
     )
 
-        # =========================================================
+    # =========================================================
     # STEP 8: Annual Summary Table (Potential, Demand, Deficit, Utilization)
     # =========================================================
     print("\n" + "=" * 60)
@@ -1058,7 +992,8 @@ def main():
     print(f"  {'Mean':<6}{mean_potential:<14.4f}{mean_demand:<12.4f}"
           f"{mean_deficit:<12.4f}{mean_utilization:<14.4f}")
 
-    print(f"\n  >>> Mean Utilization Potential: {mean_utilization:.4f} GWh/yr ({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of economic potential)")
+    print(f"\n  >>> Mean Utilization Potential: {mean_utilization:.4f} GWh/yr "
+          f"({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of economic potential)")
 
     # Save as CSV
     csv_path = OUTPUT_DIR / "annual_potential_demand_utilization.csv"
