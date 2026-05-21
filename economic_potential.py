@@ -47,25 +47,12 @@ def _rasterize_boundaries(lakes_gdf, shape, transform):
         fill=0, all_touched=True, dtype="int32",
     )
 
-
 def _annuity_factor(wacc, lt):
-    """Compute annuity factor for given WACC and lifetime."""
+    """Annuitätenfaktor für gegebenen WACC und Lebensdauer."""
     if wacc == 0:
         return 1.0 / lt
     return wacc * (1 + wacc) ** lt / ((1 + wacc) ** lt - 1)
 
-
-def _pv_factor(wacc, lt):
-    """Present value factor for uniform annual payments: sum_{t=1}^{lt} 1/(1+wacc)^t."""
-    if wacc == 0:
-        return float(lt)
-    return (1 - (1 + wacc) ** (-lt)) / wacc
-
-
-def _discounted_op_cost(c_el, E_h, COP, wacc, lt):
-    """Compute present value of annual operation costs discounted with WACC."""
-    annual_cost = c_el * E_h / COP
-    return annual_cost * _pv_factor(wacc, lt)
 
 
 # ============================================================
@@ -176,35 +163,28 @@ def _calculate_ei_raster(cfg):
     ).astype("float32")
     mask_valid = np.isfinite(D) & (HI > 0)
 
-    # --- EI Calculation (with separate WACC for decentral/central) ---
     E_h_L = E_h_kWh[mask_valid]
     E_h_W = E_h_kWh[mask_valid] * (1 + cfg.q_loss)
 
-    # Separate annuity factors
+    # Separate Annuitätenfaktoren
     ann_d = _annuity_factor(cfg.wacc_decentral, cfg.lifetime)
     ann_c = _annuity_factor(cfg.wacc_central, cfg.lifetime)
 
-    # Present value of annual operation costs (each with own WACC)
-    disc_Air = _discounted_op_cost(
-        cfg.c_el_L, E_h_L, cfg.COP_Air, cfg.wacc_decentral, cfg.lifetime
-    )
-    disc_Water = _discounted_op_cost(
-        cfg.c_el_W, E_h_W, cfg.COP_Water, cfg.wacc_central, cfg.lifetime
-    )
+    # Jährliche Betriebskosten [€/yr]
+    annual_op_Air = cfg.c_el_L * E_h_L / cfg.COP_Air
+    annual_op_Water = cfg.c_el_W * E_h_W / cfg.COP_Water
 
-    # Annualized CAPEX (capacity = E_h / full_load_hours)
+    # Annualisierte CAPEX [€/yr]
     capex_ann_Air = ann_d * cfg.CAPEX_Air * (E_h_L / cfg.hours_Air)
     capex_ann_Water = ann_c * cfg.CAPEX_Water * (E_h_W / cfg.hours_Water)
 
-    # Numerator: cost savings of central vs. decentral (annualized)
-    numerator = (
-        capex_ann_Air + disc_Air
-        - capex_ann_Water - disc_Water
-    )
+    # Zähler: Kosteneinsparung dezentral vs. zentral [€/yr]
+    numerator = (capex_ann_Air + annual_op_Air) - (capex_ann_Water + annual_op_Water)
 
-    # Denominator: annualized pipe investment per meter (central WACC)
+    # Nenner: annualisierte Rohrinvestition [€/yr/m] × Distanz [m] → [€/yr]
     denominator = ann_c * cfg.c_pipe * D[mask_valid].astype("float64")
     denominator = np.where(denominator == 0, np.nan, denominator)
+
     EI[mask_valid] = numerator / denominator
 
     # Clean up
@@ -457,29 +437,27 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
             p = params_base.copy()
             p[param_name] = float(val)
 
-            # Compute annuity factors with respective WACCs
+            # Annuitätenfaktoren mit jeweiligem WACC
             ann_d = _annuity_factor(p["wacc_decentral"], cfg.lifetime)
             ann_c = _annuity_factor(p["wacc_central"], cfg.lifetime)
 
             E_h_W = E_h_base * (1 + p["q_loss"])
 
-            # PV of operation costs (each discounted with own WACC)
-            disc_A = _discounted_op_cost(
-                p["c_el_L"], E_h_base, p["COP_Air"],
-                p["wacc_decentral"], cfg.lifetime
-            )
-            disc_W = _discounted_op_cost(
-                p["c_el_W"], E_h_W, p["COP_Water"],
-                p["wacc_central"], cfg.lifetime
-            )
+            # Jährliche Betriebskosten [€/yr]
+            annual_op_Air = p["c_el_L"] * E_h_base / p["COP_Air"]
+            annual_op_Water = p["c_el_W"] * E_h_W / p["COP_Water"]
 
-            # Annualized CAPEX
+            # Annualisierte CAPEX [€/yr]
             capex_ann_Air = ann_d * p["CAPEX_Air"] * E_h_base / p["hours_Air"]
             capex_ann_Water = ann_c * p["CAPEX_Water"] * E_h_W / p["hours_Water"]
 
-            num = capex_ann_Air + disc_A - capex_ann_Water - disc_W
+            # Zähler [€/yr]
+            num = (capex_ann_Air + annual_op_Air) - (capex_ann_Water + annual_op_Water)
+
+            # Nenner [€/yr]
             den = ann_c * p["c_pipe"] * D_base
             den = np.where(den == 0, np.nan, den)
+
             EI_var = num / den
 
             mask_ei = EI_var >= cfg.ei_threshold
@@ -563,7 +541,7 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
               f"{row['Covered_Heat_GWh']:>15.1f}")
     print("=" * 65 + "\n")
 
-    
+
 # ============================================================
 # Plots
 # ============================================================
@@ -780,7 +758,7 @@ def plot_sensitivity(cfg, df_sens, params_base):
         "CAPEX_Water": r"$CAPEX_{Water}$",
         "hours_Air": r"$h_{Air}$",
         "hours_Water": r"$h_{Water}$",
-        "wacc_decentral": r"$WACC_{dec}$",
+        "wacc_decentral": r"$WACC_{decentral}$",
         "wacc_central": r"$WACC_{cen}$",
     }
 
