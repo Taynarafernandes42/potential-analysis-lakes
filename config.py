@@ -55,8 +55,8 @@ class Config:
     COP_Water = 3.3
     COP_Air = 2.9
     q_loss = 0.12           # heat loss fraction in pipe network
-    wacc_decentral = 0.022
-    wacc_central = 0.05
+    wacc_decentral = 0.032
+    wacc_central = 0.042
 
     CAPEX_Air = 1872.0      # €/kWth
     CAPEX_Water = 1064.0    # €/kWth
@@ -89,6 +89,7 @@ class Config:
         "CAPEX_Water": (750, 1750),
         "hours_Air": (1800, 2400),
         "hours_Water": (2000, 5000),
+        "wacc_decentral": (0.022, 0.04),
         "wacc_central": (0.03, 0.08),
     }
     sensitivity_n_steps = 10
