@@ -875,9 +875,22 @@ def main():
     # =========================================================
     # STEP 4: Generate demand profile using fixed economic potential
     # =========================================================
-    ANNUAL_DEMAND_TOTAL_KWH = 97.5711875 * 1e6
+        # =========================================================
+    # STEP 4: Generate demand profile using economic potential from CSV
+    # =========================================================
+    economic_csv_path = Path("Data/Processed/economic_potential_comparison.csv")
+    df_economic = pd.read_csv(economic_csv_path)
+    df_economic["Hylak_id"] = df_economic["Hylak_id"].astype(int)
+    lake_economic_row = df_economic[df_economic["Hylak_id"] == LAKE_ID]
+
+    if lake_economic_row.empty:
+        raise ValueError(f"Lake {LAKE_ID} not found in {economic_csv_path}")
+
+    heat_ei_MWh = float(lake_economic_row.iloc[0]["Heat_EI_ge1_MWh"])
+    ANNUAL_DEMAND_TOTAL_KWH = heat_ei_MWh * 1e3  # MWh → kWh
+
     Installed_Capacity = ANNUAL_DEMAND_TOTAL_KWH / cfg.hours_Water
-    print(f"\n  >>> Setting ANNUAL_DEMAND_TOTAL_KWH = Fixed Economic Potential = "
+    print(f"\n  >>> ANNUAL_DEMAND_TOTAL_KWH from CSV = "
           f"{ANNUAL_DEMAND_TOTAL_KWH:,.0f} kWh ({ANNUAL_DEMAND_TOTAL_KWH/1e6:.3f} GWh)")
     print(f"  >>> Corresponding Installed Capacity: {Installed_Capacity/1e3:.3f} MW")
 
