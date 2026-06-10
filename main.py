@@ -2,6 +2,7 @@ from config import Config
 import theoretical_potential
 import technical_extractable_potential
 import economic_potential
+from combined_plot import plot_combined_map
 
 
 def main():
@@ -13,6 +14,8 @@ def main():
     print("=" * 60)
     lakes = theoretical_potential.calculate(cfg)
     theoretical_potential.plot(cfg, lakes)
+    plot_combined_map(cfg, lakes, economic_potential.load_comparison_data(cfg))
+
 
     # --- Step 2: Technical-Extractable Potential ---
     print("=" * 60)
@@ -31,8 +34,12 @@ def main():
     print("=" * 60)
     economic_potential.calculate(cfg)
 
+    plot_combined_map(cfg, lakes, economic_potential.load_comparison_data(cfg))
+
     print("=" * 60)
     print("Done.")
+
+
 
 
 if __name__ == "__main__":
