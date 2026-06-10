@@ -48,20 +48,29 @@ def _rasterize_boundaries(lakes_gdf, shape, transform):
     )
 
 
-def _npv_annual_payments(annual_cost, wacc, lifetime):
-    """Compute the NPV of a uniform annual payment stream over a given lifetime."""
+def _annuity_factor(wacc, lifetime):
+    """Kapitalwiedergewinnungsfaktor (Annuitätsfaktor).
+    
+    Wandelt eine Einmalinvestition in gleichmäßige jährliche Zahlungen um.
+    Bei WACC=0 ergibt sich einfach 1/lifetime (lineare Abschreibung).
+    """
     if wacc == 0:
-        return annual_cost * lifetime
-    factor = ((1 + wacc) ** lifetime - 1) / (wacc * (1 + wacc) ** lifetime)
-    return annual_cost * factor
+        return 1.0 / lifetime
+    return wacc * (1 + wacc) ** lifetime / ((1 + wacc) ** lifetime - 1)
 
 
 # ============================================================
-# Core EI Calculation (NPV-based)
+# Core EI Calculation (Annuity Method)
 # ============================================================
 
 def _calculate_ei_raster(cfg):
-    """Compute Economic Index raster using NPV method. Returns arrays + metadata."""
+    """Compute Economic Index raster using Annuity method. Returns arrays + metadata.
+    
+    EI = (Jährliche Gesamtkosten Air - Jährliche Gesamtkosten Water) / Jährliche Pipeline-Kosten
+    
+    Alle Kosten (CAPEX und OPEX) werden als jährliche Äquivalente verglichen.
+    CAPEX wird über den jeweiligen WACC annualisiert.
+    """
 
     # Load heat raster
     with rasterio.open(cfg.heat_path) as src:
@@ -167,30 +176,30 @@ def _calculate_ei_raster(cfg):
     E_h_L = E_h_kWh[mask_valid]                          # Heat demand for air-source [kWh]
     E_h_W = E_h_kWh[mask_valid] * (1 + cfg.q_loss)       # Heat demand incl. losses for water-source [kWh]
 
-    # --- NPV-based EI calculation ---
-    # NPV of investment costs (one-time at t=0)
-    npv_inv_Air = cfg.CAPEX_Air * (E_h_L / cfg.hours_Air)
-    npv_inv_Water = cfg.CAPEX_Water * (E_h_W / cfg.hours_Water)
+    # --- Annuity-based EI calculation ---
+    # Annuity factors for CAPEX
+    af_decentral = _annuity_factor(cfg.wacc_decentral, cfg.lifetime)
+    af_central = _annuity_factor(cfg.wacc_central, cfg.lifetime)
 
-    # NPV of operating costs (annual payments discounted over lifetime)
-    annual_op_Air = cfg.c_el_L * E_h_L / cfg.COP_Air
-    annual_op_Water = cfg.c_el_W * E_h_W / cfg.COP_Water
+    # Jährliche Gesamtkosten Air-source (dezentral):
+    #   = CAPEX_Air * Leistung * Annuitätsfaktor_dezentral + Stromkosten/Jahr
+    annual_capex_Air = cfg.CAPEX_Air * (E_h_L / cfg.hours_Air) * af_decentral
+    annual_opex_Air = cfg.c_el_L * E_h_L / cfg.COP_Air
+    annual_total_Air = annual_capex_Air + annual_opex_Air
 
-    npv_op_Air = _npv_annual_payments(annual_op_Air, cfg.wacc_decentral, cfg.lifetime)
-    npv_op_Water = _npv_annual_payments(annual_op_Water, cfg.wacc_central, cfg.lifetime)
+    # Jährliche Gesamtkosten Water-source (zentral):
+    #   = CAPEX_Water * Leistung * Annuitätsfaktor_zentral + Stromkosten/Jahr
+    annual_capex_Water = cfg.CAPEX_Water * (E_h_W / cfg.hours_Water) * af_central
+    annual_opex_Water = cfg.c_el_W * E_h_W / cfg.COP_Water
+    annual_total_Water = annual_capex_Water + annual_opex_Water
 
-    # Total NPV per technology
-    npv_total_Air = npv_inv_Air + npv_op_Air
-    npv_total_Water = npv_inv_Water + npv_op_Water
+    # Jährliche Pipeline-Kosten (zentral finanziert):
+    #   = Einmalinvestition * Annuitätsfaktor_zentral
+    annual_pipeline = cfg.c_pipe * D[mask_valid].astype("float64") * af_central
+    annual_pipeline = np.where(annual_pipeline == 0, np.nan, annual_pipeline)
 
-    # Numerator: NPV cost savings (air-source minus water-source)
-    numerator = npv_total_Air - npv_total_Water
-
-    # Denominator: Pipeline investment cost (one-time at t=0)
-    denominator = cfg.c_pipe * D[mask_valid].astype("float64")
-    denominator = np.where(denominator == 0, np.nan, denominator)
-
-    EI[mask_valid] = numerator / denominator
+    # EI = Jährliche Einsparung / Jährliche Pipeline-Kosten
+    EI[mask_valid] = (annual_total_Air - annual_total_Water) / annual_pipeline
 
     # Clean up invalid pixels
     if nodata_heat is not None:
@@ -212,6 +221,8 @@ def _calculate_ei_raster(cfg):
         dst.write(HUB.astype("float32"), 4)
 
     print(f"  EI raster saved: {cfg.ei_output_tif}")
+    print(f"  Annuity factor decentral (WACC={cfg.wacc_decentral*100:.1f}%): {af_decentral:.5f}")
+    print(f"  Annuity factor central   (WACC={cfg.wacc_central*100:.1f}%):   {af_central:.5f}")
     return EI, HI, D, heat_data, transform, crs_raster
 
 
@@ -243,7 +254,20 @@ def _load_ei_results(cfg):
     if heat_nodata is not None:
         heat_data[heat_data == heat_nodata] = np.nan
 
-    return ei_data, hylak_data, dist_data, hub_data, heat_data, transform, crs
+    actual_dist_data = _compute_actual_distance_to_lake(cfg, transform, crs, heat_data.shape)
+    return ei_data, hylak_data, dist_data, hub_data, heat_data, actual_dist_data, transform, crs
+
+
+def _compute_actual_distance_to_lake(cfg, transform, crs, shape):
+    lakes = gpd.read_file(cfg.lakes_path)
+    if lakes.crs != crs:
+        lakes = lakes.to_crs(crs)
+
+    boundary_labels = _rasterize_boundaries(lakes, shape, transform)
+    boundary_bool = boundary_labels > 0
+    px, py = abs(transform.a), abs(transform.e)
+    dist_to_shore_m = ndi.distance_transform_edt(~boundary_bool, sampling=(py, px))
+    return dist_to_shore_m.astype("float32")
 
 
 def _get_lake_ids(cfg, crs):
@@ -289,7 +313,6 @@ def _merge_with_potential(heat_df, cfg):
     pot_df = pd.read_csv(cfg.technical_extractable_csv)
     pot_df["Hylak_id"] = pot_df["Hylak_id"].astype(int)
     pot_df["technical_extractable_Thermal_Potential_GWh"] = pot_df["potential_Wh"] / 1e9
-
     df = pd.merge(
         heat_df,
         pot_df[["Hylak_id", "technical_extractable_Thermal_Potential_GWh"]],
@@ -297,6 +320,7 @@ def _merge_with_potential(heat_df, cfg):
     )
     df["Heat_EI_ge1_GWh"] = df["Heat_EI_ge1_GWh"].fillna(0)
     df["technical_extractable_Thermal_Potential_GWh"] = df["technical_extractable_Thermal_Potential_GWh"].fillna(0)
+
     df["Covered_Heat_GWh"] = np.minimum(df["Heat_EI_ge1_GWh"], df["technical_extractable_Thermal_Potential_GWh"])
 
     total_GWh = df["Covered_Heat_GWh"].sum()
@@ -313,6 +337,17 @@ def _merge_with_potential(heat_df, cfg):
     Path(cfg.economic_compare_csv).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(cfg.economic_compare_csv, index=False)
     return df
+
+
+def load_comparison_data(cfg):
+    """Load economic comparison results created by economic_potential.calculate()."""
+    compare_path = Path(cfg.economic_compare_csv)
+    if compare_path.exists():
+        return pd.read_csv(compare_path)
+    raise FileNotFoundError(
+        f"Economic comparison CSV not found: {compare_path}. "
+        "Run economic_potential.calculate(cfg) first."
+    )
 
 
 # ============================================================
@@ -403,12 +438,12 @@ def _select_utilized_hubs(cfg, ei_data, hylak_data, hub_data, heat_data):
 
 
 # ============================================================
-# Sensitivity Analysis (NPV-based)
+# Sensitivity Analysis (Annuity Method)
 # ============================================================
 
 def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
-    """Vary EI parameters (incl. separate WACCs) and compute resulting economic potential.
-    Uses NPV method for discounting operating costs over the system lifetime."""
+    """Vary EI parameters and compute resulting economic potential.
+    Uses Annuity method: all costs annualized with respective WACC."""
 
     mask_base = np.isfinite(dist_data) & (hylak_data > 0) & np.isfinite(heat_data) & (heat_data > 0)
     E_h_base = heat_data[mask_base].astype("float64") * 1000.0  # kWh
@@ -443,30 +478,28 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
             p = params_base.copy()
             p[param_name] = float(val)
 
+            # Annuity factors
+            af_decentral = _annuity_factor(p["wacc_decentral"], cfg.lifetime)
+            af_central = _annuity_factor(p["wacc_central"], cfg.lifetime)
+
             E_h_W = E_h_base * (1 + p["q_loss"])
 
-            # NPV of investment costs (one-time at t=0)
-            npv_inv_Air = p["CAPEX_Air"] * E_h_base / p["hours_Air"]
-            npv_inv_Water = p["CAPEX_Water"] * E_h_W / p["hours_Water"]
+            # Jährliche Gesamtkosten Air (dezentral)
+            annual_capex_Air = p["CAPEX_Air"] * (E_h_base / p["hours_Air"]) * af_decentral
+            annual_opex_Air = p["c_el_L"] * E_h_base / p["COP_Air"]
+            annual_total_Air = annual_capex_Air + annual_opex_Air
 
-            # NPV of operating costs (annual payments discounted over lifetime)
-            npv_op_Air = _npv_annual_payments(
-                p["c_el_L"] * E_h_base / p["COP_Air"], p["wacc_decentral"], cfg.lifetime
-            )
-            npv_op_Water = _npv_annual_payments(
-                p["c_el_W"] * E_h_W / p["COP_Water"], p["wacc_central"], cfg.lifetime
-            )
+            # Jährliche Gesamtkosten Water (zentral)
+            annual_capex_Water = p["CAPEX_Water"] * (E_h_W / p["hours_Water"]) * af_central
+            annual_opex_Water = p["c_el_W"] * E_h_W / p["COP_Water"]
+            annual_total_Water = annual_capex_Water + annual_opex_Water
 
-            # Total NPV per technology
-            npv_total_Air = npv_inv_Air + npv_op_Air
-            npv_total_Water = npv_inv_Water + npv_op_Water
+            # Jährliche Pipeline-Kosten (zentral finanziert)
+            annual_pipeline = p["c_pipe"] * D_base * af_central
+            annual_pipeline = np.where(annual_pipeline == 0, np.nan, annual_pipeline)
 
-            # EI = NPV savings / pipeline investment
-            num = npv_total_Air - npv_total_Water
-            den = p["c_pipe"] * D_base
-            den = np.where(den == 0, np.nan, den)
-
-            EI_var = num / den
+            # EI
+            EI_var = (annual_total_Air - annual_total_Water) / annual_pipeline
 
             mask_ei = EI_var >= cfg.ei_threshold
 
@@ -513,17 +546,23 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     ei_median = float(np.nanmedian(ei_valid)) if ei_valid.size > 0 else 0.0
     ei_mean = float(np.nanmean(ei_valid)) if ei_valid.size > 0 else 0.0
 
+    # Annuity factors for display
+    af_decentral = _annuity_factor(cfg.wacc_decentral, cfg.lifetime)
+    af_central = _annuity_factor(cfg.wacc_central, cfg.lifetime)
+
     # Top lakes
     top_lakes = compare_df.nlargest(5, "Covered_Heat_GWh")[
         ["Hylak_id", "Heat_EI_ge1_GWh", "technical_extractable_Thermal_Potential_GWh", "Covered_Heat_GWh"]
     ]
 
     print("\n" + "=" * 65)
-    print("  ECONOMIC POTENTIAL – BASE CASE SUMMARY (NPV Method)")
+    print("  ECONOMIC POTENTIAL – BASE CASE SUMMARY (Annuity Method)")
     print("=" * 65)
-    print(f"  Method:                           Net Present Value (NPV)")
+    print(f"  Method:                           Annuity (Jahreskosten)")
     print(f"  WACC decentral (air-source HP):   {cfg.wacc_decentral * 100:.1f} %")
+    print(f"    → Annuity factor:               {af_decentral:.5f}")
     print(f"  WACC central (water-source HP):   {cfg.wacc_central * 100:.1f} %")
+    print(f"    → Annuity factor:               {af_central:.5f}")
     print(f"  Lifetime:                         {cfg.lifetime} years")
     print(f"  EI threshold:                     {cfg.ei_threshold}")
     print(f"  Max pipe distance:                {cfg.ei_max_dist_m:,.0f} m")
@@ -543,10 +582,10 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     print(f"  EI median (valid pixels):         {ei_median:.2f}")
     print("-" * 65)
     print("  Top 5 lakes by economic potential:")
-    print(f"  {'Hylak_id':>10} {'Demand GWh':>12} {'Tech. Pot. GWh':>15} {'Econ. Pot. GWh':>15}")
+    print(f"  {'Hylak_id':>10} {'EI Demand GWh':>15} {'Tech. Pot. GWh':>20} {'Econ. Pot. GWh':>15}")
     for _, row in top_lakes.iterrows():
-        print(f"  {int(row['Hylak_id']):>10} {row['Heat_EI_ge1_GWh']:>12.1f} "
-              f"{row['technical_extractable_Thermal_Potential_GWh']:>15.1f} "
+        print(f"  {int(row['Hylak_id']):>10} {row['Heat_EI_ge1_GWh']:>15.1f} "
+              f"{row['technical_extractable_Thermal_Potential_GWh']:>20.1f} "
               f"{row['Covered_Heat_GWh']:>15.1f}")
     print("=" * 65 + "\n")
 
@@ -555,8 +594,8 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
 # Plots
 # ============================================================
 
-def plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask=None):
-    """EI scatter plot: distance vs heat demand, colored by EI."""
+def plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask=None, actual_dist_data=None):
+    """EI scatter plot: effective connection distance and actual lake distance."""
     base_font = 11
     factor = 1 / 0.65
     plt.rcParams.update({
@@ -567,42 +606,50 @@ def plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask=None):
         "mathtext.fontset": "cm",
     })
 
-    mask_plot = np.isfinite(ei_data) & np.isfinite(dist_data) & np.isfinite(heat_data) & (heat_data > 0)
+    mask_common = np.isfinite(ei_data) & np.isfinite(heat_data) & (heat_data > 0) & (ei_data > 0)
     if utilized_mask is not None:
-        mask_plot &= utilized_mask
-    mask_plot &= (ei_data > 0)
+        mask_common &= utilized_mask
 
-    ei_vals = np.clip(ei_data[mask_plot], 0, 5)
-    dist_vals = dist_data[mask_plot]
-    heat_vals = heat_data[mask_plot]
+    if actual_dist_data is None:
+        raise ValueError("actual_dist_data must be provided for scatter plotting.")
+
+    ei_vals = np.clip(ei_data[mask_common], 0, 5)
+    dist_eff_vals = dist_data[mask_common] / 1000.0
+    dist_actual_vals = actual_dist_data[mask_common] / 1000.0
+    heat_vals = heat_data[mask_common]
 
     mask_gray = ei_vals < 1
     mask_color = ei_vals >= 1
 
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, axes = plt.subplots(1, 2, figsize=(24, 8), sharey=True)
+    x_labels = ["Effective connection distance", "Distance to lake"]
+    dist_arrays = [dist_eff_vals, dist_actual_vals]
 
-    if np.any(mask_gray):
-        ax.scatter(dist_vals[mask_gray], heat_vals[mask_gray],
-                   c="lightgray", s=5, alpha=0.7, linewidths=0, label="EI < 1")
-    if np.any(mask_color):
-        sc = ax.scatter(dist_vals[mask_color], heat_vals[mask_color],
-                        c=ei_vals[mask_color], cmap="plasma_r",
-                        s=5, alpha=1, linewidths=0, norm=LogNorm(vmin=1, vmax=5))
-        cbar = fig.colorbar(sc, ax=ax, pad=0.02)
-        cbar.set_label("EI (clipped at 5)")
-        cbar.set_ticks([1, 2, 3, 4, 5])
-        cbar.ax.yaxis.set_major_formatter(plt.ScalarFormatter())
+    for ax, dist_vals, label in zip(axes, dist_arrays, x_labels):
+        if np.any(mask_gray):
+            ax.scatter(dist_vals[mask_gray], heat_vals[mask_gray],
+                       c="lightgray", s=5, alpha=0.7, linewidths=0, label="EI < 1")
+        if np.any(mask_color):
+            sc = ax.scatter(dist_vals[mask_color], heat_vals[mask_color],
+                            c=ei_vals[mask_color], cmap="plasma_r",
+                            s=5, alpha=1, linewidths=0, norm=LogNorm(vmin=1, vmax=5))
+            cbar = fig.colorbar(sc, ax=ax, pad=0.02)
+            cbar.set_label("EI (clipped at 5)")
+            cbar.set_ticks([1, 2, 3, 4, 5])
+            cbar.ax.yaxis.set_major_formatter(plt.ScalarFormatter())
 
-    ax.set_xlim(left=0, right=cfg.ei_max_dist_m)
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Distance to Lake (m)")
-    ax.set_ylabel("Heat Demand [MWh/yr]")
-    if ax.get_legend_handles_labels()[0]:
-        ax.legend(markerscale=3, loc="upper right")
+        ax.set_xlim(left=0, right=10)
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel(f"{label} [km]")
+        if label == x_labels[0]:
+            ax.set_ylabel("Heat Demand [MWh/yr]")
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(markerscale=3, loc="upper right")
+        ax.set_title(label)
 
     plt.tight_layout()
     Path(cfg.economic_scatter_plot_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(cfg.economic_scatter_plot_path, dpi=300, bbox_inches="tight")
+    plt.savefig(cfg.economic_scatter_plot_path.replace(".png", ".svg"), format="svg", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -757,18 +804,18 @@ def plot_sensitivity(cfg, df_sens, params_base):
 
     # --- Configuration ---
     math_labels = {
-        "c_el_L": r"$c_{el,L}$",
-        "c_el_W": r"$c_{el,W}$",
+        "c_el_L": r"$c_{el,ASHP}$",
+        "c_el_W": r"$c_{el,LSWSHP}$",
         "c_pipe": r"$c_{pipe}$",
-        "COP_Water": r"$COP_{Water}$",
-        "COP_Air": r"$COP_{Air}$",
+        "COP_Water": r"$COP_{LSWSHP}$",
+        "COP_Air": r"$COP_{ASHP}$",
         "q_loss": r"$q_{loss}$",
-        "CAPEX_Air": r"$CAPEX_{Air}$",
-        "CAPEX_Water": r"$CAPEX_{Water}$",
-        "hours_Air": r"$h_{Air}$",
-        "hours_Water": r"$h_{Water}$",
-        "wacc_decentral": r"$WACC_{decentral}$",
-        "wacc_central": r"$WACC_{cen}$",
+        "CAPEX_Air": r"$CAPEX_{ASHP}$",
+        "CAPEX_Water": r"$CAPEX_{LSWSHP}$",
+        "hours_Air": r"$h_{ASHP}$",
+        "hours_Water": r"$h_{LSWSHP}$",
+        "wacc_decentral": r"$WACC_{ASHP}$",
+        "wacc_central": r"$WACC_{LSWSHP}$",
     }
 
     air_params = ['c_el_L', 'COP_Air', 'CAPEX_Air', 'hours_Air', 'wacc_decentral']
@@ -776,18 +823,24 @@ def plot_sensitivity(cfg, df_sens, params_base):
     other_params = ['c_pipe', 'q_loss']
 
     param_colors = {
-        'c_el_L': '#004d00',
-        'COP_Air': '#1a9641',
-        'CAPEX_Air': '#7bcf74',
-        'hours_Air': '#b8e986',
-        'wacc_decentral': '#556b2f',
-        'c_el_W': '#08306b',
-        'COP_Water': '#2171b5',
-        'CAPEX_Water': '#6baed6',
-        'hours_Water': '#9ecae1',
-        'wacc_central': '#d62728',
-        'c_pipe': '#2d2d2d',
-        'q_loss': '#888888',
+        'c_el_L': '#1b5e20',
+        'COP_Air': '#43a047',
+        'CAPEX_Air': '#7cb342',
+        'hours_Air': '#a5d6a7',
+        'wacc_decentral': "#de5d1c",
+        'c_el_W': '#0d47a1',
+        'COP_Water': '#1976d2',
+        'CAPEX_Water': '#42a5f5',
+        'hours_Water': '#90caf9',
+        'wacc_central': '#d32f2f',
+        'c_pipe': '#424242',
+        'q_loss': '#757575',
+    }
+
+    param_marker = {
+        **{param: 'o' for param in air_params},
+        **{param: 's' for param in water_params},
+        **{param: 'D' for param in other_params},
     }
 
     # --- Determine baseline utilization ---
@@ -825,8 +878,11 @@ def plot_sensitivity(cfg, df_sens, params_base):
         subset['y_norm'] = (subset['Utilization_GWh'] - baseline) / baseline * 100
 
         color = param_colors.get(param, '#333333')
-        ax.scatter(subset['x_norm'], subset['y_norm'], color=color, s=40, zorder=3, alpha=0.85)
-        ax.plot(subset['x_norm'], subset['y_norm'], color=color, linewidth=2.2, alpha=0.85)
+        marker = param_marker.get(param, 'o')
+        ax.scatter(subset['x_norm'], subset['y_norm'], color=color, marker=marker,
+                   s=40, linewidth=0, zorder=3, alpha=0.85)
+        ax.plot(subset['x_norm'], subset['y_norm'], color=color, linewidth=2.0,
+                alpha=0.8, linestyle='-')
 
     ax.axhline(y=0, color='black', linewidth=1, linestyle='-')
     ax.axvline(x=0, color='black', linewidth=1, linestyle='-')
@@ -838,7 +894,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
         ax.set_xlabel('Parametervariation vom Basiswert [%]', fontsize=12)
         ax.set_ylabel('Wirtschaftliches Potential – Variation vom Basiswert [%]', fontsize=12)
 
-    ax.grid(alpha=0.3)
+    ax.grid(which='major', color='gray', linestyle='-', linewidth=0.6, alpha=0.4)
+    ax.minorticks_on()
+    ax.grid(which='minor', color='gray', linestyle=':', linewidth=0.4, alpha=0.25)
 
     # --- Grouped legend ---
     legend_handles = []
@@ -850,7 +908,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
     legend_labels.append(air_title)
     for param in air_params:
         if param in param_colors:
-            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], marker=param_marker.get(param, 'o'),
+                                         markerfacecolor=param_colors[param], linestyle='-', linewidth=2.5,
+                                         markersize=5))
             legend_labels.append(math_labels.get(param, param))
 
     water_title = (r'$\bf{Water\text{-}source\ HP}$' if cfg.plot_language == "en"
@@ -859,7 +919,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
     legend_labels.append(water_title)
     for param in water_params:
         if param in param_colors:
-            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], marker=param_marker.get(param, 's'),
+                                         markerfacecolor=param_colors[param], linestyle='-', linewidth=2.5,
+                                         markersize=5))
             legend_labels.append(math_labels.get(param, param))
 
     other_title = r'$\bf{Other}$' if cfg.plot_language == "en" else r'$\bf{Sonstige}$'
@@ -867,7 +929,9 @@ def plot_sensitivity(cfg, df_sens, params_base):
     legend_labels.append(other_title)
     for param in other_params:
         if param in param_colors:
-            legend_handles.append(Line2D([0], [0], color=param_colors[param], linewidth=2.5))
+            legend_handles.append(Line2D([0], [0], color=param_colors[param], marker=param_marker.get(param, 'D'),
+                                         markerfacecolor=param_colors[param], linestyle='-', linewidth=2.5,
+                                         markersize=5))
             legend_labels.append(math_labels.get(param, param))
     max_col_len = max(len(air_params), len(water_params), len(other_params))
     for _ in range(max_col_len - len(other_params)):
@@ -904,11 +968,11 @@ def calculate(cfg):
         if cfg.use_cache and not ei_cache_exists:
             print(f"  [CACHE] EI raster not found, computing fresh...")
         else:
-            print("  Computing EI raster (NPV method)...")
+            print("  Computing EI raster (Annuity method)...")
         _calculate_ei_raster(cfg)
 
     # 2. Load results and get lake list
-    ei_data, hylak_data, dist_data, hub_data, heat_data, transform, crs = _load_ei_results(cfg)
+    ei_data, hylak_data, dist_data, hub_data, heat_data, actual_dist_data, transform, crs = _load_ei_results(cfg)
     lakes_gdf = _get_lake_ids(cfg, crs)
 
     # 3. Per-lake heat aggregation (with cache)
@@ -947,7 +1011,7 @@ def calculate(cfg):
 
     # 6. Scatter plot
     print("  Plotting EI scatter...")
-    plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask)
+    plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask, actual_dist_data)
 
     # 7. Map plot
     print("  Plotting economic potential map...")
