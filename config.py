@@ -55,7 +55,8 @@ class Config:
     COP_Water = 3.3
     COP_Air = 2.9
     q_loss = 0.12           # heat loss fraction in pipe network
-    inflation_rate = 0.02
+    wacc_decentral = 0.02
+    wacc_central = 0.06
 
     CAPEX_Air = 1872.0      # €/kWth
     CAPEX_Water = 1064.0    # €/kWth
@@ -88,11 +89,13 @@ class Config:
         "CAPEX_Water": (750, 1750),
         "hours_Air": (1800, 2400),
         "hours_Water": (2000, 5000),
+        "wacc_decentral": (0.01, 0.03),
+        "wacc_central": (0.04, 0.08), 
     }
     sensitivity_n_steps = 10
     sensitivity_plot_params = [
         "CAPEX_Air", "hours_Air", "c_el_L", "COP_Air",
-        "CAPEX_Water", "hours_Water", "c_el_W", "COP_Water", "q_loss", "c_pipe",
+        "CAPEX_Water", "hours_Water", "c_el_W", "COP_Water", "wacc_central", "q_loss", "c_pipe",  
     ]
 
     # --- Derived paths ---
