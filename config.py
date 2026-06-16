@@ -83,7 +83,7 @@ class Config:
         "c_el_W": (0.15, 0.25),
         "c_pipe": (2000, 3500),
         "COP_Water": (3.0, 4.0),
-        "COP_Air": (2.5, 3.75),
+        "COP_Air": (2.6, 3.75),
         "q_loss": (0.07, 0.20),
         "CAPEX_Air": (1380, 2240),
         "CAPEX_Water": (520, 1500),

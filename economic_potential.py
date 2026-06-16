@@ -857,16 +857,22 @@ def plot_sensitivity(cfg, df_sens, params_base):
     all_params = df_sens['parameter'].unique()
     fig, ax = plt.subplots(figsize=(11, 7))
 
+    nominal_wacc_offset = 0.02  # Add 2 percentage points inflation to display nominal WACC on x-axis.
+
     for param in all_params:
         subset = df_sens[df_sens['parameter'] == param].copy()
 
+        tested_values_for_plot = subset['tested_value'].astype(float)
+        if param in {'wacc_decentral', 'wacc_central'}:
+            tested_values_for_plot = tested_values_for_plot + nominal_wacc_offset
+
         # Find baseline tested_value for this parameter
         baseline_idx = (subset['Utilization_GWh'] - baseline).abs().idxmin()
-        baseline_tested = subset.loc[baseline_idx, 'tested_value']
+        baseline_tested = tested_values_for_plot.loc[baseline_idx]
 
         # Normalize: % change from baseline
         if baseline_tested != 0:
-            subset['x_norm'] = (subset['tested_value'] - baseline_tested) / abs(baseline_tested) * 100
+            subset['x_norm'] = (tested_values_for_plot - baseline_tested) / abs(baseline_tested) * 100
         else:
             subset['x_norm'] = 0.0
         subset['y_norm'] = (subset['Utilization_GWh'] - baseline) / baseline * 100
