@@ -221,8 +221,6 @@ def _calculate_ei_raster(cfg):
         dst.write(HUB.astype("float32"), 4)
 
     print(f"  EI raster saved: {cfg.ei_output_tif}")
-    print(f"  Annuity factor decentral (WACC={cfg.wacc_decentral*100:.1f}%): {af_decentral:.5f}")
-    print(f"  Annuity factor central   (WACC={cfg.wacc_central*100:.1f}%):   {af_central:.5f}")
     return EI, HI, D, heat_data, transform, crs_raster
 
 
@@ -558,11 +556,7 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     print("\n" + "=" * 65)
     print("  ECONOMIC POTENTIAL – BASE CASE SUMMARY (Annuity Method)")
     print("=" * 65)
-    print(f"  Method:                           Annuity (Jahreskosten)")
-    print(f"  WACC decentral (air-source HP):   {cfg.wacc_decentral * 100:.1f} %")
-    print(f"    → Annuity factor:               {af_decentral:.5f}")
-    print(f"  WACC central (water-source HP):   {cfg.wacc_central * 100:.1f} %")
-    print(f"    → Annuity factor:               {af_central:.5f}")
+    print(f"  Method:                           Annuity ")
     print(f"  Lifetime:                         {cfg.lifetime} years")
     print(f"  EI threshold:                     {cfg.ei_threshold}")
     print(f"  Max pipe distance:                {cfg.ei_max_dist_m:,.0f} m")

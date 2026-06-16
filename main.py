@@ -14,8 +14,6 @@ def main():
     print("=" * 60)
     lakes = theoretical_potential.calculate(cfg)
     theoretical_potential.plot(cfg, lakes)
-    plot_combined_map(cfg, lakes, economic_potential.load_comparison_data(cfg))
-
 
     # --- Step 2: Technical-Extractable Potential ---
     print("=" * 60)
