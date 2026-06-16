@@ -38,7 +38,7 @@ class Config:
     label_bodensee = False
     bodensee_id = 1243
 
-    # --- Technical-extractable (technical_extractable) potential ---
+    # --- Technical-extractable potential ---
     deltaT_hex = 5.0
     deltaT_technical_extractable = 1.0
     hours_per_year = 3500
