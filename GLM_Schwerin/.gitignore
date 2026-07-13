@@ -1,0 +1,32 @@
+# --- Data (do not commit raw or processed data) ------------------------------
+Data/Raw/*
+Data/Processed/*
+Data/Results/*
+!Data/Raw/.gitkeep
+!Data/Processed/.gitkeep
+!Data/Results/.gitkeep
+
+# --- GLM run outputs ---------------------------------------------------------
+output/
+*.nc
+WaterTemp*.csv
+lake.csv
+*.png
+*.pdf
+*.svg
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# --- R -----------------------------------------------------------------------
+.Rhistory
+.RData
+.Rproj.user/
+
+# --- OS ----------------------------------------------------------------------
+.DS_Store
+Thumbs.db
