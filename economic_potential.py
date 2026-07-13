@@ -221,6 +221,8 @@ def _calculate_ei_raster(cfg):
         dst.write(HUB.astype("float32"), 4)
 
     print(f"  EI raster saved: {cfg.ei_output_tif}")
+    print(f"  Annuity factor decentral (WACC={cfg.wacc_decentral*100:.1f}%): {af_decentral:.5f}")
+    print(f"  Annuity factor central   (WACC={cfg.wacc_central*100:.1f}%):   {af_central:.5f}")
     return EI, HI, D, heat_data, transform, crs_raster
 
 
@@ -556,7 +558,11 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     print("\n" + "=" * 65)
     print("  ECONOMIC POTENTIAL – BASE CASE SUMMARY (Annuity Method)")
     print("=" * 65)
-    print(f"  Method:                           Annuity ")
+    print(f"  Method:                           Annuity (Jahreskosten)")
+    print(f"  WACC decentral (air-source HP):   {cfg.wacc_decentral * 100:.1f} %")
+    print(f"    → Annuity factor:               {af_decentral:.5f}")
+    print(f"  WACC central (water-source HP):   {cfg.wacc_central * 100:.1f} %")
+    print(f"    → Annuity factor:               {af_central:.5f}")
     print(f"  Lifetime:                         {cfg.lifetime} years")
     print(f"  EI threshold:                     {cfg.ei_threshold}")
     print(f"  Max pipe distance:                {cfg.ei_max_dist_m:,.0f} m")
@@ -857,22 +863,16 @@ def plot_sensitivity(cfg, df_sens, params_base):
     all_params = df_sens['parameter'].unique()
     fig, ax = plt.subplots(figsize=(11, 7))
 
-    nominal_wacc_offset = 0.02  # Add 2 percentage points inflation to display nominal WACC on x-axis.
-
     for param in all_params:
         subset = df_sens[df_sens['parameter'] == param].copy()
 
-        tested_values_for_plot = subset['tested_value'].astype(float)
-        if param in {'wacc_decentral', 'wacc_central'}:
-            tested_values_for_plot = tested_values_for_plot + nominal_wacc_offset
-
         # Find baseline tested_value for this parameter
         baseline_idx = (subset['Utilization_GWh'] - baseline).abs().idxmin()
-        baseline_tested = tested_values_for_plot.loc[baseline_idx]
+        baseline_tested = subset.loc[baseline_idx, 'tested_value']
 
         # Normalize: % change from baseline
         if baseline_tested != 0:
-            subset['x_norm'] = (tested_values_for_plot - baseline_tested) / abs(baseline_tested) * 100
+            subset['x_norm'] = (subset['tested_value'] - baseline_tested) / abs(baseline_tested) * 100
         else:
             subset['x_norm'] = 0.0
         subset['y_norm'] = (subset['Utilization_GWh'] - baseline) / baseline * 100
@@ -953,82 +953,6 @@ def plot_sensitivity(cfg, df_sens, params_base):
 
 
 # ============================================================
-# Distance-Band Economic Viability Analysis
-# ============================================================
-
-def _distance_band_analysis(cfg, ei_data, heat_data, actual_dist_data, hylak_data):
-    """Analyse how much heat demand within distance bands (1 km, 10 km) is economically viable (EI >= threshold).
-    
-    Uses actual Euclidean distance to nearest lake shore (not effective/hub distance).
-    """
-    
-    mask_valid = (
-        np.isfinite(ei_data) & np.isfinite(heat_data) & (heat_data > 0)
-        & np.isfinite(actual_dist_data) & (hylak_data > 0)
-    )
-    
-    bands_m = [1000, 10000]  # 1 km, 10 km
-    
-    results = []
-    
-    for max_dist_m in bands_m:
-        # All pixels within this distance band
-        mask_band = mask_valid & (actual_dist_data <= max_dist_m)
-        # Pixels within band AND economically viable
-        mask_viable = mask_band & (ei_data >= cfg.ei_threshold)
-        
-        total_demand_MWh = float(np.nansum(heat_data[mask_band]))
-        viable_demand_MWh = float(np.nansum(heat_data[mask_viable]))
-        
-        n_pixels_band = int(mask_band.sum())
-        n_pixels_viable = int(mask_viable.sum())
-        
-        share_demand = (viable_demand_MWh / total_demand_MWh * 100) if total_demand_MWh > 0 else 0.0
-        share_pixels = (n_pixels_viable / n_pixels_band * 100) if n_pixels_band > 0 else 0.0
-        
-        results.append({
-            "Distance_band_km": max_dist_m / 1000,
-            "Total_demand_GWh": total_demand_MWh / 1000,
-            "Viable_demand_GWh": viable_demand_MWh / 1000,
-            "Share_demand_pct": share_demand,
-            "N_pixels_total": n_pixels_band,
-            "N_pixels_viable": n_pixels_viable,
-            "Share_pixels_pct": share_pixels,
-        })
-    
-    df = pd.DataFrame(results)
-    
-    # Print summary
-    print("\n" + "-" * 65)
-    print("  DISTANCE-BAND ECONOMIC VIABILITY ANALYSIS")
-    print(f"  (EI threshold: {cfg.ei_threshold})")
-    print("-" * 65)
-    print(f"  {'Band':>8} | {'Total Demand':>14} | {'Viable (EI≥1)':>14} | {'Share':>8} | {'Pixels viable':>14}")
-    print(f"  {'':>8} | {'[GWh/yr]':>14} | {'[GWh/yr]':>14} | {'[%]':>8} | {'[%]':>14}")
-    print("  " + "-" * 63)
-    for _, row in df.iterrows():
-        print(f"  {row['Distance_band_km']:>6.0f} km | "
-              f"{row['Total_demand_GWh']:>14,.1f} | "
-              f"{row['Viable_demand_GWh']:>14,.1f} | "
-              f"{row['Share_demand_pct']:>7.1f}% | "
-              f"{row['Share_pixels_pct']:>12.1f}%")
-    print("-" * 65)
-    
-    # Also show TWh for readability
-    for _, row in df.iterrows():
-        print(f"  Within {row['Distance_band_km']:.0f} km: "
-              f"{row['Viable_demand_GWh']/1000:.2f} TWh of {row['Total_demand_GWh']/1000:.2f} TWh "
-              f"economically viable ({row['Share_demand_pct']:.1f}%)")
-    print("")
-    
-    # Save to CSV
-    out_path = Path(cfg.economic_compare_csv).parent / "distance_band_viability.csv"
-    df.to_csv(out_path, index=False)
-    print(f"  Distance-band analysis saved: {out_path}")
-    
-    return df
-
-# ============================================================
 # Main Entry Point
 # ============================================================
 
@@ -1067,10 +991,6 @@ def calculate(cfg):
 
     # 4. Base case summary output
     _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data)
-
-    # 4b. Distance-band economic viability analysis
-    print("  Analysing economic viability by distance to lake...")
-    dist_band_df = _distance_band_analysis(cfg, ei_data, heat_data, actual_dist_data, hylak_data)
 
     # 5. Utilization selection (with cache)
     utilized_cache_path = Path(cfg.utilized_mask_cache_path)
