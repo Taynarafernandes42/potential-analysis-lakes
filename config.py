@@ -38,7 +38,7 @@ class Config:
     label_bodensee = False
     bodensee_id = 1243
 
-    # --- Technical-extractable (technical_extractable) potential ---
+    # --- Technical-extractable potential ---
     deltaT_hex = 5.0
     deltaT_technical_extractable = 1.0
     hours_per_year = 3500
@@ -49,18 +49,18 @@ class Config:
 
     # --- Economic potential (EI) ---
     c_el_L = 0.37           # €/kWh electricity (air-source HP, decentralized)
-    c_el_W = 0.16           # €/kWh electricity (water-source HP, centralized)
+    c_el_W = 0.17           # €/kWh electricity (water-source HP, centralized)
     lifetime = 20           # years
     c_pipe = 2500.0         # €/m pipe cost
     COP_Water = 3.3
-    COP_Air = 2.9
+    COP_Air = 2.8
     q_loss = 0.12           # heat loss fraction in pipe network
-    wacc_decentral = 0.02
-    wacc_central = 0.06
+    wacc_decentral = 0.02   # 4% nominal WACC - 2% inflation = 2% realWACC 
+    wacc_central = 0.06     # 8% nominal WACC - 2% inflation = 2% realWACC 
 
-    CAPEX_Air = 1872.0      # €/kWth
-    CAPEX_Water = 1064.0    # €/kWth
-    hours_Air = 2200        # h/a full load hours air HP
+    CAPEX_Air = 1901.0      # €/kWth
+    CAPEX_Water = 1080.0    # €/kWth
+    hours_Air = 2150        # h/a full load hours air HP
     hours_Water = 3500      # h/a full load hours water HP
 
     # Distance / Hub parameters
@@ -79,18 +79,18 @@ class Config:
     # Economic sensitivity
     run_economic_sensitivity = True
     sensitivity_param_ranges = {
-        "c_el_L": (0.25, 0.45),
-        "c_el_W": (0.12, 0.20),
+        "c_el_L": (0.25, 0.47),
+        "c_el_W": (0.15, 0.25),
         "c_pipe": (2000, 3500),
-        "COP_Water": (3.0, 4.5),
-        "COP_Air": (2.5, 3.5),
-        "q_loss": (0.10, 0.20),
-        "CAPEX_Air": (1500, 2500),
-        "CAPEX_Water": (750, 1750),
-        "hours_Air": (1800, 2400),
+        "COP_Water": (3.0, 4.0),
+        "COP_Air": (2.6, 3.75),
+        "q_loss": (0.07, 0.20),
+        "CAPEX_Air": (1380, 2240),
+        "CAPEX_Water": (520, 1500),
+        "hours_Air": (2000, 2300),
         "hours_Water": (2000, 5000),
         "wacc_decentral": (0.01, 0.03),
-        "wacc_central": (0.04, 0.08), 
+        "wacc_central": (0.03, 0.09), 
     }
     sensitivity_n_steps = 10
     sensitivity_plot_params = [
