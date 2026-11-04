@@ -19,7 +19,7 @@ import warnings
 import holidays as hol
 from demandlib import bdew
 
-from config import Config
+from config import Config, lake_to_useful
 
 warnings.filterwarnings("ignore")
 
@@ -376,7 +376,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     hoy = np.arange(len(pot_yr))
 
     # Convert potential to kW for comparison
-    potential_kW = pot_yr["capacity_kW"].values
+    potential_kW = pot_yr["useful_kW"].values
     demand_kW = dem_yr.values
 
     # --- Distinct color palette ---
@@ -447,7 +447,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     # ----------------------------------------------------------------
     ax = axes[1]
     ax.fill_between(hoy, potential_kW / 1000, color=COLOR_POTENTIAL, alpha=0.45, lw=0,
-                    label=f"Lake thermal potential (peak: {potential_kW.max()/1000:.2f} MW)")
+                    label=f"Lake-based useful heat (peak: {potential_kW.max()/1000:.2f} MW)")
     ax.plot(hoy, demand_kW / 1000, lw=0.6, color=COLOR_DEMAND,
             label=f"Heating demand (peak: {demand_kW.max()/1000:.2f} MW)")
 
@@ -519,7 +519,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     pot_yr_indexed = pot_yr.copy()
     pot_yr_indexed["month"] = pot_yr_indexed.index.month
-    pot_yr_indexed["potential_kWh"] = pot_yr_indexed["capacity_kW"]
+    pot_yr_indexed["potential_kWh"] = pot_yr_indexed["useful_kW"]
 
     dem_yr_indexed = pd.DataFrame({"demand_kWh": demand_kW}, index=pot_yr.index)
     dem_yr_indexed["month"] = dem_yr_indexed.index.month
@@ -602,7 +602,7 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
             continue
 
         n = min(len(pot_yr), len(dem_yr), 8760)
-        pot_kW = pot_yr["capacity_kW"].values[:n]
+        pot_kW = pot_yr["useful_kW"].values[:n]
         dem_kW = dem_yr.values[:n]
 
         # Day of year (0-indexed, capped at 365 days)
@@ -708,7 +708,7 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
             continue
 
         n = min(len(pot_yr), len(dem_yr), n_hours)
-        pot_kW = pot_yr["capacity_kW"].values[:n]
+        pot_kW = pot_yr["useful_kW"].values[:n]
         dem_kW = dem_yr.values[:n]
 
         # Deficit: demand that cannot be met by lake potential
@@ -868,6 +868,28 @@ def main():
     )
 
     # =========================================================
+    # STEP 2b: Useful-heat conversion
+    # =========================================================
+    df_hourly["lake_kW"] = df_hourly["capacity_kW"]
+    df_hourly["useful_kW"] = np.where(
+        df_hourly["extractable"],
+        lake_to_useful(df_hourly["lake_kW"], df_hourly["COP"], cfg.q_loss),
+        0.0,
+    )
+
+    n_years = df_hourly["year"].nunique()
+    mean_cop_extractable = float(df_hourly.loc[df_hourly["extractable"], "COP"].mean()) if df_hourly["extractable"].any() else 0.0
+    mean_lake_heat_GWh_yr = df_hourly.loc[df_hourly["extractable"], "lake_kW"].sum() / 1e6 / n_years
+    mean_useful_heat_GWh_yr = df_hourly.loc[df_hourly["extractable"], "useful_kW"].sum() / 1e6 / n_years
+
+    print("\n" + "=" * 60)
+    print("  STEP 2b: USEFUL-HEAT CONVERSION")
+    print("=" * 60)
+    print(f"  Mean hourly COP (extractable hours): {mean_cop_extractable:.3f}")
+    print(f"  Mean annual lake heat extracted:    {mean_lake_heat_GWh_yr:.3f} GWh/yr")
+    print(f"  Mean annual useful heat:             {mean_useful_heat_GWh_yr:.3f} GWh/yr")
+
+    # =========================================================
     # STEP 3: Outage analysis
     # =========================================================
     outage_info = analyse_outages(df_hourly, complete_years_lake)
@@ -905,12 +927,16 @@ def main():
     print(f"\n  >>> Capping lake thermal capacity at Installed Capacity: "
           f"{Installed_Capacity_kW/1e3:.3f} MW ({Installed_Capacity_kW:.1f} kW)")
 
-    pre_cap_peak = df_hourly["capacity_kW"].max()
-    df_hourly["capacity_kW"] = df_hourly["capacity_kW"].clip(upper=Installed_Capacity_kW)
-    df_hourly["capacity_MW"] = df_hourly["capacity_kW"] / 1000.0
-    post_cap_peak = df_hourly["capacity_kW"].max()
+    pre_cap_peak = df_hourly["useful_kW"].max()
+    df_hourly["useful_kW"] = df_hourly["useful_kW"].clip(upper=Installed_Capacity_kW)
+    post_cap_peak = df_hourly["useful_kW"].max()
 
-    hours_capped = int((df_hourly["capacity_kW"] == Installed_Capacity_kW).sum())
+    hours_capped = int((df_hourly["useful_kW"] == Installed_Capacity_kW).sum())
+    df_hourly["lake_extracted_kW"] = np.where(
+        df_hourly["extractable"],
+        df_hourly["useful_kW"] * (1 + cfg.q_loss) * (1 - 1 / df_hourly["COP"]),
+        0.0,
+    )
     print(f"  Pre-cap peak:   {pre_cap_peak/1e3:.3f} MW")
     print(f"  Post-cap peak:  {post_cap_peak/1e3:.3f} MW")
     print(f"  Hours capped:   {hours_capped} "
@@ -968,7 +994,7 @@ def main():
             continue
 
         n = min(len(pot_yr), len(dem_yr), 8760)
-        pot_kW = pot_yr["capacity_kW"].values[:n]
+        pot_kW = pot_yr["useful_kW"].values[:n]
         dem_kW = dem_yr.values[:n]
 
         total_potential_GWh = pot_kW.sum() / 1e6

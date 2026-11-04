@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LogNorm
 
+from config import lake_to_useful
+
 
 # ============================================================
 # Utilities
@@ -59,6 +61,23 @@ def _annuity_factor(wacc, lifetime):
     return wacc * (1 + wacc) ** lifetime / ((1 + wacc) ** lifetime - 1)
 
 
+def _read_lakes_with_known_crs(cfg, target_crs=None):
+    """Read HydroLAKES and guard against missing/broken .prj metadata."""
+    lakes = gpd.read_file(cfg.lakes_path)
+
+    if lakes.crs is None:
+        lakes = lakes.set_crs("EPSG:4326", allow_override=True)
+    elif isinstance(lakes.crs, str):
+        try:
+            lakes = lakes.set_crs(lakes.crs, allow_override=True)
+        except Exception:
+            lakes = lakes.set_crs("EPSG:4326", allow_override=True)
+
+    if target_crs is not None and lakes.crs != target_crs:
+        lakes = lakes.to_crs(target_crs)
+    return lakes
+
+
 # ============================================================
 # Core EI Calculation (Annuity Method)
 # ============================================================
@@ -81,7 +100,7 @@ def _calculate_ei_raster(cfg):
         nodata_heat = src.nodata
 
     # Load lakes
-    lakes = gpd.read_file(cfg.lakes_path).to_crs(crs_raster)
+    lakes = _read_lakes_with_known_crs(cfg, crs_raster)
 
     # Rasterize lake boundaries and compute Euclidean distance transform
     boundary_labels = _rasterize_boundaries(lakes, heat_data.shape, transform)
@@ -257,9 +276,7 @@ def _load_ei_results(cfg):
 
 
 def _compute_actual_distance_to_lake(cfg, transform, crs, shape):
-    lakes = gpd.read_file(cfg.lakes_path)
-    if lakes.crs != crs:
-        lakes = lakes.to_crs(crs)
+    lakes = _read_lakes_with_known_crs(cfg, crs)
 
     boundary_labels = _rasterize_boundaries(lakes, shape, transform)
     boundary_bool = boundary_labels > 0
@@ -270,9 +287,7 @@ def _compute_actual_distance_to_lake(cfg, transform, crs, shape):
 
 def _get_lake_ids(cfg, crs):
     """Load lake GeoDataFrame, apply NUTS filter, return filtered GDF."""
-    lakes = gpd.read_file(cfg.lakes_path)
-    if lakes.crs != crs:
-        lakes = lakes.to_crs(crs)
+    lakes = _read_lakes_with_known_crs(cfg, crs)
 
     if cfg.nuts1_filter:
         nuts1 = gpd.read_file(cfg.nuts1_path).to_crs(crs)
@@ -318,14 +333,16 @@ def _merge_with_potential(heat_df, cfg):
     )
     df["Heat_EI_ge1_GWh"] = df["Heat_EI_ge1_GWh"].fillna(0)
     df["technical_extractable_Thermal_Potential_GWh"] = df["technical_extractable_Thermal_Potential_GWh"].fillna(0)
-
-    df["Covered_Heat_GWh"] = np.minimum(df["Heat_EI_ge1_GWh"], df["technical_extractable_Thermal_Potential_GWh"])
+    df["technical_useful_Heat_GWh"] = lake_to_useful(
+        df["technical_extractable_Thermal_Potential_GWh"], cfg.COP_Water, cfg.q_loss)
+    df["Covered_Heat_GWh"] = np.minimum(df["Heat_EI_ge1_GWh"], df["technical_useful_Heat_GWh"])
+    df["Lake_Heat_Extracted_GWh"] = df["Covered_Heat_GWh"] * (1 + cfg.q_loss) * (1 - 1 / cfg.COP_Water)
 
     total_GWh = df["Covered_Heat_GWh"].sum()
     n_no_demand = int((df["Heat_EI_ge1_GWh"] == 0).sum())
     df_with_demand = df[df["Heat_EI_ge1_GWh"] > 0]
-    n_pot_gt = int((df_with_demand["technical_extractable_Thermal_Potential_GWh"] > df_with_demand["Heat_EI_ge1_GWh"]).sum())
-    n_pot_lt = int((df_with_demand["technical_extractable_Thermal_Potential_GWh"] < df_with_demand["Heat_EI_ge1_GWh"]).sum())
+    n_pot_gt = int((df_with_demand["technical_useful_Heat_GWh"] > df_with_demand["Heat_EI_ge1_GWh"]).sum())
+    n_pot_lt = int((df_with_demand["technical_useful_Heat_GWh"] < df_with_demand["Heat_EI_ge1_GWh"]).sum())
 
     print(f"  Lakes with no economic potential: {n_no_demand}")
     print(f"  Lakes where technical > economic demand: {n_pot_gt}")
@@ -337,11 +354,36 @@ def _merge_with_potential(heat_df, cfg):
     return df
 
 
+REQUIRED_COMPARE_COLUMNS = {
+    "Hylak_id",
+    "Heat_EI_ge1_MWh",
+    "Heat_EI_ge1_GWh",
+    "technical_extractable_Thermal_Potential_GWh",
+    "technical_useful_Heat_GWh",
+    "Covered_Heat_GWh",
+    "Lake_Heat_Extracted_GWh",
+}
+
+
+def _has_required_compare_columns(compare_df):
+    """Return False for stale/incomplete cache files missing summary columns."""
+    if not isinstance(compare_df, pd.DataFrame):
+        return False
+    return REQUIRED_COMPARE_COLUMNS.issubset(set(compare_df.columns))
+
+
 def load_comparison_data(cfg):
     """Load economic comparison results created by economic_potential.calculate()."""
     compare_path = Path(cfg.economic_compare_csv)
     if compare_path.exists():
-        return pd.read_csv(compare_path)
+        compare_df = pd.read_csv(compare_path)
+        if not _has_required_compare_columns(compare_df):
+            missing = sorted(REQUIRED_COMPARE_COLUMNS.difference(compare_df.columns))
+            raise ValueError(
+                f"Economic comparison cache is stale/incomplete at {compare_path}. "
+                f"Missing columns: {missing}. Re-run economic_potential.calculate(cfg)."
+            )
+        return compare_df
     raise FileNotFoundError(
         f"Economic comparison CSV not found: {compare_path}. "
         "Run economic_potential.calculate(cfg) first."
@@ -362,7 +404,7 @@ def _select_utilized_hubs(cfg, ei_data, hylak_data, hub_data, heat_data):
 
     pot_df = pd.read_csv(cfg.technical_extractable_csv)
     pot_df["Hylak_id"] = pot_df["Hylak_id"].astype(int)
-    pot_df["pot_MWh"] = pot_df["potential_Wh"] / 1e6
+    pot_df["pot_MWh"] = lake_to_useful(pot_df["potential_Wh"] / 1e6, cfg.COP_Water, cfg.q_loss)
     pot_map = dict(zip(pot_df["Hylak_id"], pot_df["pot_MWh"]))
 
     lake_ids = np.unique(hylak_data[mask_valid])
@@ -504,8 +546,10 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
             if np.any(mask_ei):
                 uids, inv = np.unique(HI_base[mask_ei], return_inverse=True)
                 sums = np.bincount(inv, weights=heat_MWh_base[mask_ei]).astype(float)
-                covered = sum(min(s / 1000.0, pot_map.get(int(uid), 0.0))
-                              for uid, s in zip(uids, sums))
+                covered = sum(
+                    min(s / 1000.0, lake_to_useful(pot_map.get(int(uid), 0.0), p["COP_Water"], p["q_loss"]))
+                    for uid, s in zip(uids, sums)
+                )
             else:
                 covered = 0.0
 
@@ -528,6 +572,8 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     total_covered_TWh = total_covered_GWh / 1000.0
     total_demand_GWh = compare_df["Heat_EI_ge1_GWh"].sum()
     total_technical_GWh = compare_df["technical_extractable_Thermal_Potential_GWh"].sum()
+    total_technical_useful_GWh = compare_df["technical_useful_Heat_GWh"].sum()
+    total_lake_extracted_GWh = compare_df["Lake_Heat_Extracted_GWh"].sum()
 
     n_lakes_total = len(compare_df)
     n_lakes_with_potential = int((compare_df["Covered_Heat_GWh"] > 0).sum())
@@ -564,7 +610,9 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
     print(f"  Total economic potential:         {total_covered_TWh:.2f} TWh/yr")
     print(f"                                    ({total_covered_GWh:,.0f} GWh/yr)")
     print(f"  Total heat demand (EI>={cfg.ei_threshold}):      {total_demand_GWh / 1000:.2f} TWh/yr")
-    print(f"  Total technical potential:        {total_technical_GWh / 1000:.2f} TWh/yr")
+    print(f"  Total technical potential (lake): {total_technical_GWh / 1000:.2f} TWh/yr")
+    print(f"  Total technical potential (useful): {total_technical_useful_GWh / 1000:.2f} TWh/yr")
+    print(f"  Lake heat extracted (econ.):      {total_lake_extracted_GWh / 1000:.2f} TWh/yr")
     print("-" * 65)
     print(f"  Lakes total:                      {n_lakes_total}")
     print(f"  Lakes with economic potential:    {n_lakes_with_potential}")
@@ -1053,13 +1101,24 @@ def calculate(cfg):
 
     # 3. Per-lake heat aggregation (with cache)
     compare_cache_exists = Path(cfg.economic_compare_csv).exists()
+    compare_df = None
 
     if cfg.use_cache and compare_cache_exists:
         print(f"  [CACHE] Loading existing economic comparison: {cfg.economic_compare_csv}")
         compare_df = pd.read_csv(cfg.economic_compare_csv)
-    else:
+        if not _has_required_compare_columns(compare_df):
+            missing = sorted(REQUIRED_COMPARE_COLUMNS.difference(compare_df.columns))
+            print(
+                "  [CACHE] Economic comparison cache is stale/incomplete; "
+                f"missing columns: {missing}. Recomputing..."
+            )
+            compare_df = None
+
+    if compare_df is None:
         if cfg.use_cache and not compare_cache_exists:
             print(f"  [CACHE] Economic comparison CSV not found, computing fresh...")
+        elif cfg.use_cache:
+            print("  [CACHE] Economic comparison cache invalid, computing fresh...")
         else:
             print("  Computing per-lake economic heat demand...")
         heat_df = _compute_heat_per_lake(cfg, ei_data, hylak_data, heat_data, lakes_gdf)

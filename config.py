@@ -2,6 +2,21 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 
+# Lake-side heat extraction vs. consumer-side useful heat:
+# Q_lake = Q_useful * (1 + q_loss) * (1 - 1/COP)
+# Q_useful = Q_lake / ((1 + q_loss) * (1 - 1/COP))
+# Q_lake = heat extracted from the lake, Q_useful = useful heat delivered to the consumer,
+# q_loss = network heat loss fraction, COP = heat-pump COP (scalar or hourly array).
+
+def useful_to_lake(q_useful, cop, q_loss):
+    """Consumer-side useful heat -> heat that must be extracted from the lake."""
+    return q_useful * (1.0 + q_loss) * (1.0 - 1.0 / cop)
+
+
+def lake_to_useful(q_lake, cop, q_loss):
+    """Heat extracted from the lake -> consumer-side useful heat it can supply."""
+    return q_lake / ((1.0 + q_loss) * (1.0 - 1.0 / cop))
+
 
 class Config:
     # Language
