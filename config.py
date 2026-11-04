@@ -23,6 +23,7 @@ class Config:
     plot_language = "en"
 
     use_cache = True
+    cache_tag = "useful_heat_v1"
 
     # Filter (None = all of Germany)
     nuts1_filter = None
@@ -157,4 +158,8 @@ class Config:
     @property
     def utilized_mask_cache_path(self):
         suffix = f"_{self.nuts1_filter[0]}" if self.nuts1_filter else ""
-        return str(Path(self.processed_dir) / f"utilized_mask{suffix}.npy")
+        return str(Path(self.processed_dir) / f"utilized_mask_{self.cache_tag}{suffix}.npy")
+
+    @property
+    def economic_sensitivity_csv(self):
+        return str(Path(self.processed_dir) / f"economic_sensitivity_{self.cache_tag}.csv")

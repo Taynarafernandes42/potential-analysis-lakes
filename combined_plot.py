@@ -1,6 +1,7 @@
 # combined_plot.py
 from pathlib import Path
 import geopandas as gpd
+from lake_io import read_lakes
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -45,7 +46,7 @@ def plot_combined_map(cfg, lakes_theoretical, compare_df):
     height = ymax - ymin
 
     # --- Prepare economic potential lake data ---
-    lakes_gdf = gpd.read_file(cfg.lakes_path).to_crs(target_crs)
+    lakes_gdf = read_lakes(cfg, target_crs)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
     compare_df = compare_df.copy()
     compare_df["Hylak_id"] = compare_df["Hylak_id"].astype(int)

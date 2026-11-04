@@ -20,6 +20,7 @@ import holidays as hol
 from demandlib import bdew
 
 from config import Config, lake_to_useful
+from lake_io import read_lakes
 
 warnings.filterwarnings("ignore")
 
@@ -34,10 +35,7 @@ OUTPUT_DIR = Path(cfg.results_dir) / "CaseStudy_Schwerin"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 LAKE_TEMP_CSV = Path("Data/Raw/schwerin_temperature_13.5m_hourly.csv")
-AIR_TEMP_CSV = Path(
-    r"D:\Users\pau07368\PycharmProjects\potential-analysis-lakes-1"
-    r"\Data\Raw\schwerin_airtemp_1994_2020.csv"
-)
+AIR_TEMP_CSV = Path("Data/Raw/schwerin_airtemp_1994_2020.csv")
 
 # Physical / technical parameters
 RHO = cfg.density_water
@@ -534,7 +532,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     ax.bar(months - width / 2, monthly_pot.values, width,
            color=COLOR_POTENTIAL, edgecolor="k", lw=0.3, alpha=0.85,
-           label="Lake potential")
+           label="Lake-based useful heat")
     ax.bar(months + width / 2, monthly_dem.values, width,
            color=COLOR_DEMAND, edgecolor="k", lw=0.3, alpha=0.85,
            label="Heating demand")
@@ -543,7 +541,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     ax.set_xticklabels(month_labels)
     ax.set_ylabel("Energy [GWh/month]")
     ax.set_xlabel("Month")
-    ax.set_title(f"Monthly Energy Balance \u2013 Potential vs. Demand ({selected_year})")
+    ax.set_title(f"Monthly Energy Balance \u2013 Lake-based Useful Heat vs. Demand ({selected_year})")
     ax.legend(loc="upper right")
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / f"monthly_balance_{selected_year}.svg",
@@ -560,19 +558,19 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     coverage_overall = min(total_potential_GWh / total_demand_GWh * 100, 100)
 
     print(f"\n  --- Year {selected_year} Summary ---")
-    print(f"  Total potential:     {total_potential_GWh:.2f} GWh")
+    print(f"  Total useful heat:   {total_potential_GWh:.2f} GWh")
     print(f"  Total demand:        {total_demand_GWh:.2f} GWh")
     print(f"  Overall coverage:    {coverage_overall:.1f}%")
     print(f"  Hours with deficit:  {deficit_hours} h ({deficit_hours/87.6:.1f}%)")
     print(f"  Total deficit:       {total_deficit_kWh/1e6:.2f} GWh")
     print(f"  Total surplus:       {total_surplus_kWh/1e6:.2f} GWh")
     print(f"  Peak demand:         {demand_kW.max()/1000:.2f} MW")
-    print(f"  Peak potential:      {potential_kW.max()/1000:.2f} MW")
+    print(f"  Peak useful heat:    {potential_kW.max()/1000:.2f} MW")
     print(f"  Outage hours:        {int(yr_stats['hours_outage'])}")
 
     return {
         "year": selected_year,
-        "potential_GWh": total_potential_GWh,
+        "useful_heat_GWh": total_potential_GWh,
         "demand_GWh": total_demand_GWh,
         "coverage_pct": coverage_overall,
         "deficit_hours": deficit_hours,
@@ -649,7 +647,7 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
 
     ax.set_xlabel("Day of Year")
     ax.set_ylabel("Year")
-    ax.set_title("Daily Energy Coverage: Lake Potential / Heating Demand [%]")
+    ax.set_title("Daily Energy Coverage: Lake-based Useful Heat / Heating Demand [%]")
 
     cbar = plt.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Coverage [%]")
@@ -821,7 +819,7 @@ def main():
     print("=" * 60)
 
     # --- Load lake geometry ---
-    lakes_gdf = gpd.read_file(cfg.lakes_path).to_crs(cfg.target_crs)
+    lakes_gdf = read_lakes(cfg, cfg.target_crs)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
     lake_row = lakes_gdf[lakes_gdf["Hylak_id"] == LAKE_ID]
     if lake_row.empty:
@@ -932,11 +930,6 @@ def main():
     post_cap_peak = df_hourly["useful_kW"].max()
 
     hours_capped = int((df_hourly["useful_kW"] == Installed_Capacity_kW).sum())
-    df_hourly["lake_extracted_kW"] = np.where(
-        df_hourly["extractable"],
-        df_hourly["useful_kW"] * (1 + cfg.q_loss) * (1 - 1 / df_hourly["COP"]),
-        0.0,
-    )
     print(f"  Pre-cap peak:   {pre_cap_peak/1e3:.3f} MW")
     print(f"  Post-cap peak:  {post_cap_peak/1e3:.3f} MW")
     print(f"  Hours capped:   {hours_capped} "
@@ -997,39 +990,52 @@ def main():
         pot_kW = pot_yr["useful_kW"].values[:n]
         dem_kW = dem_yr.values[:n]
 
+        cop = pot_yr["COP"].values[:n]
+        extractable = pot_yr["extractable"].values[:n]
+
         total_potential_GWh = pot_kW.sum() / 1e6
         total_demand_GWh = dem_kW.sum() / 1e6
         total_deficit_GWh = np.maximum(0, dem_kW - pot_kW).sum() / 1e6
         utilization_potential_GWh = total_demand_GWh - total_deficit_GWh
 
+        # Source side: lake heat actually extracted to supply the covered demand
+        covered_kW = np.minimum(dem_kW, pot_kW)
+        lake_extracted_kW = np.where(
+            extractable, covered_kW * (1 + cfg.q_loss) * (1 - 1 / cop), 0.0
+        )
+        lake_extracted_GWh = lake_extracted_kW.sum() / 1e6
+
         annual_table_rows.append({
             "Year": year,
-            "Lake_Potential_GWh": round(total_potential_GWh, 4),
+            "Useful_Heat_GWh": round(total_potential_GWh, 4),
             "Demand_GWh": round(total_demand_GWh, 4),
             "Deficit_GWh": round(total_deficit_GWh, 4),
             "Utilization_Potential_GWh": round(utilization_potential_GWh, 4),
+            "Lake_Heat_Extracted_GWh": round(lake_extracted_GWh, 4),
         })
 
     df_annual_table = pd.DataFrame(annual_table_rows)
 
     # Print table
-    print(f"\n  {'Year':<6}{'Potential':<14}{'Demand':<12}{'Deficit':<12}{'Utilization':<14}")
-    print(f"  {'':6}{'[GWh]':<14}{'[GWh]':<12}{'[GWh]':<12}{'[GWh]':<14}")
-    print(f"  {'-' * 58}")
+    print(f"\n  {'Year':<6}{'Useful heat':<14}{'Demand':<12}{'Deficit':<12}{'Utilization':<14}{'Lake extr.':<12}")
+    print(f"  {'':6}{'[GWh]':<14}{'[GWh]':<12}{'[GWh]':<12}{'[GWh]':<14}{'[GWh]':<12}")
+    print(f"  {'-' * 70}")
     for _, row in df_annual_table.iterrows():
-        print(f"  {int(row['Year']):<6}{row['Lake_Potential_GWh']:<14.4f}"
+        print(f"  {int(row['Year']):<6}{row['Useful_Heat_GWh']:<14.4f}"
               f"{row['Demand_GWh']:<12.4f}{row['Deficit_GWh']:<12.4f}"
-              f"{row['Utilization_Potential_GWh']:<14.4f}")
+              f"{row['Utilization_Potential_GWh']:<14.4f}"
+              f"{row['Lake_Heat_Extracted_GWh']:<12.4f}")
 
     # Mean values
-    mean_potential = df_annual_table["Lake_Potential_GWh"].mean()
+    mean_lake_extracted = df_annual_table["Lake_Heat_Extracted_GWh"].mean()
+    mean_potential = df_annual_table["Useful_Heat_GWh"].mean()
     mean_demand = df_annual_table["Demand_GWh"].mean()
     mean_deficit = df_annual_table["Deficit_GWh"].mean()
     mean_utilization = df_annual_table["Utilization_Potential_GWh"].mean()
 
-    print(f"  {'-' * 58}")
+    print(f"  {'-' * 70}")
     print(f"  {'Mean':<6}{mean_potential:<14.4f}{mean_demand:<12.4f}"
-          f"{mean_deficit:<12.4f}{mean_utilization:<14.4f}")
+          f"{mean_deficit:<12.4f}{mean_utilization:<14.4f}{mean_lake_extracted:<12.4f}")
 
     print(f"\n  >>> Mean Utilization Potential: {mean_utilization:.4f} GWh/yr "
           f"({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of economic potential)")
@@ -1044,7 +1050,7 @@ def main():
     # =========================================================
     combined_summary = {
         "lake_id": LAKE_ID,
-        "static_potential_GWh": static["potential_GWh"],
+        "static_lake_heat_GWh": static["potential_GWh"],
         "annual_demand_GWh": ANNUAL_DEMAND_TOTAL_KWH / 1e6,
         "selected_year": selected_year,
         **results,

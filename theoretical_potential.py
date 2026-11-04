@@ -1,5 +1,6 @@
 from pathlib import Path
 import geopandas as gpd
+from lake_io import read_lakes
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -7,7 +8,7 @@ import matplotlib.patches as mpatches
 
 def calculate(cfg):
     """Calculate theoretical thermal potential for all lakes."""
-    lakes = gpd.read_file(cfg.lakes_path).to_crs(cfg.target_crs)
+    lakes = read_lakes(cfg, cfg.target_crs)
 
     if cfg.nuts1_filter:
         nuts1 = gpd.read_file(cfg.nuts1_path).to_crs(cfg.target_crs)

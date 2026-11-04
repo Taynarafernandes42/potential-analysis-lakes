@@ -18,6 +18,7 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import LogNorm
 
 from config import lake_to_useful
+from lake_io import read_lakes
 
 
 # ============================================================
@@ -61,23 +62,6 @@ def _annuity_factor(wacc, lifetime):
     return wacc * (1 + wacc) ** lifetime / ((1 + wacc) ** lifetime - 1)
 
 
-def _read_lakes_with_known_crs(cfg, target_crs=None):
-    """Read HydroLAKES and guard against missing/broken .prj metadata."""
-    lakes = gpd.read_file(cfg.lakes_path)
-
-    if lakes.crs is None:
-        lakes = lakes.set_crs("EPSG:4326", allow_override=True)
-    elif isinstance(lakes.crs, str):
-        try:
-            lakes = lakes.set_crs(lakes.crs, allow_override=True)
-        except Exception:
-            lakes = lakes.set_crs("EPSG:4326", allow_override=True)
-
-    if target_crs is not None and lakes.crs != target_crs:
-        lakes = lakes.to_crs(target_crs)
-    return lakes
-
-
 # ============================================================
 # Core EI Calculation (Annuity Method)
 # ============================================================
@@ -100,7 +84,7 @@ def _calculate_ei_raster(cfg):
         nodata_heat = src.nodata
 
     # Load lakes
-    lakes = _read_lakes_with_known_crs(cfg, crs_raster)
+    lakes = read_lakes(cfg, crs_raster)
 
     # Rasterize lake boundaries and compute Euclidean distance transform
     boundary_labels = _rasterize_boundaries(lakes, heat_data.shape, transform)
@@ -276,7 +260,7 @@ def _load_ei_results(cfg):
 
 
 def _compute_actual_distance_to_lake(cfg, transform, crs, shape):
-    lakes = _read_lakes_with_known_crs(cfg, crs)
+    lakes = read_lakes(cfg, crs)
 
     boundary_labels = _rasterize_boundaries(lakes, shape, transform)
     boundary_bool = boundary_labels > 0
@@ -287,7 +271,7 @@ def _compute_actual_distance_to_lake(cfg, transform, crs, shape):
 
 def _get_lake_ids(cfg, crs):
     """Load lake GeoDataFrame, apply NUTS filter, return filtered GDF."""
-    lakes = _read_lakes_with_known_crs(cfg, crs)
+    lakes = read_lakes(cfg, crs)
 
     if cfg.nuts1_filter:
         nuts1 = gpd.read_file(cfg.nuts1_path).to_crs(crs)
@@ -710,7 +694,7 @@ def plot_map(cfg, compare_df):
         "mathtext.fontset": "cm",
     })
 
-    lakes_gdf = gpd.read_file(cfg.lakes_path).to_crs(target_crs)
+    lakes_gdf = read_lakes(cfg, target_crs)
     germany_gdf = gpd.read_file(cfg.germany_path).to_crs(target_crs)
     states_gdf = gpd.read_file(cfg.nuts3_path).to_crs(target_crs)
 
@@ -1102,6 +1086,7 @@ def calculate(cfg):
     # 3. Per-lake heat aggregation (with cache)
     compare_cache_exists = Path(cfg.economic_compare_csv).exists()
     compare_df = None
+    compare_recomputed = False
 
     if cfg.use_cache and compare_cache_exists:
         print(f"  [CACHE] Loading existing economic comparison: {cfg.economic_compare_csv}")
@@ -1123,6 +1108,7 @@ def calculate(cfg):
             print("  Computing per-lake economic heat demand...")
         heat_df = _compute_heat_per_lake(cfg, ei_data, hylak_data, heat_data, lakes_gdf)
         compare_df = _merge_with_potential(heat_df, cfg)
+        compare_recomputed = True
 
     # 4. Base case summary output
     _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data)
@@ -1135,7 +1121,8 @@ def calculate(cfg):
     utilized_cache_path = Path(cfg.utilized_mask_cache_path)
     utilized_cache_exists = utilized_cache_path.exists()
 
-    if cfg.use_cache and utilized_cache_exists:
+    # Reuse only if the comparison itself came from a valid cache
+    if cfg.use_cache and utilized_cache_exists and not compare_recomputed:
         print(f"  [CACHE] Loading existing utilization mask: {utilized_cache_path}")
         utilized_mask = np.load(utilized_cache_path)
     else:
@@ -1158,10 +1145,10 @@ def calculate(cfg):
 
     # 8. Sensitivity analysis (with cache)
     if cfg.run_economic_sensitivity:
-        sens_csv_path = Path(cfg.economic_sensitivity_plot_path).with_suffix(".csv")
+        sens_csv_path = Path(cfg.economic_sensitivity_csv)
         sens_cache_exists = sens_csv_path.exists()
 
-        if cfg.use_cache and sens_cache_exists:
+        if cfg.use_cache and sens_cache_exists and not compare_recomputed:
             print(f"  [CACHE] Loading existing sensitivity results: {sens_csv_path}")
             df_sens = pd.read_csv(sens_csv_path)
             params_base = {
