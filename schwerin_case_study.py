@@ -53,6 +53,24 @@ T_SUPPLY_C = 75.0     # DH supply temperature [°C] (manuscript: 75-80 °C)
 T_RETURN_C = 40.0     # DH return temperature [°C]
 LORENZ_EFF = 0.5      # Lorenz efficiency eta_L [-] (Pieper et al.: 0.5 literature value)
 
+# ASHP reference (climate-year comparison, appendix):
+#   hourly COP following When2Heat (Ruhnau et al. 2019; Ruhnau & Muessel 2022,
+#   parameters from github.com/oruhnau/when2heat, input/cop/cop_parameters.csv):
+#   COP = f_corr * (c0 + c1*dT + c2*dT^2),  dT = T_sink - T_air  (dT >= 15 K)
+#   Sink: radiator heating curve T_sink = 40 - T_air (space heating),
+#         50 °C for domestic hot water
+ASHP_C0 = 6.08
+ASHP_C1 = -0.0941
+ASHP_C2 = 0.000464
+ASHP_DT_MIN = 15.0         # lower bound of the temperature lift [K]
+ASHP_CORRECTION = 0.85     # correction based on field measurements
+ASHP_SINK_SH_BASE = 40.0   # radiator heating curve: T_sink = 40 - 1.0 * T_air
+ASHP_SINK_SH_SLOPE = -1.0
+ASHP_SINK_DHW = 50.0       # domestic hot water sink temperature [°C]
+
+# Backup for hours without lake-source supply (appendix comparison only)
+BACKUP_EFF = 1.0         # electric boiler, same tariff as LSWSHP
+
 # Year shown in the detailed plots (None = most representative outage year)
 SELECTED_YEAR_OVERRIDE = 2017
 
@@ -331,6 +349,8 @@ def generate_demand_profile(annual_demand_kWh, air_temp_df, target_years):
     hw_demand = annual_demand_kWh * 0.15
 
     profiles = []
+    profiles_sh = []
+    profiles_dhw = []
     for year in target_years:
         year_data = air_temp_df.loc[air_temp_df.index.year == year]
         if len(year_data) < 8760:
@@ -371,11 +391,15 @@ def generate_demand_profile(annual_demand_kWh, air_temp_df, target_years):
         combined = heating + hotwater
         combined.name = "demand_kW"
         profiles.append(combined)
+        profiles_sh.append(heating)
+        profiles_dhw.append(hotwater)
         print(f"    {year} done - peak: {combined.max():.1f} kW, "
               f"sum: {combined.sum()/1e6:.2f} GWh")
 
     demand_all = pd.concat(profiles)
-    return demand_all
+    demand_sh = pd.concat(profiles_sh)
+    demand_dhw = pd.concat(profiles_dhw)
+    return demand_all, demand_sh, demand_dhw
 
 
 # ============================================================
@@ -848,6 +872,160 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
 
 
 # ============================================================
+# STEP 9: CLIMATE-YEAR COMPARISON LSWSHP vs. ASHP (appendix)
+# ============================================================
+
+def _annuity_factor(wacc, lifetime):
+    if wacc == 0:
+        return 1.0 / lifetime
+    return wacc * (1 + wacc) ** lifetime / ((1 + wacc) ** lifetime - 1)
+
+
+def calc_cop_ashp(t_air_C, t_sink_C):
+    """Hourly ASHP COP following When2Heat (incl. field correction factor)."""
+    dt = np.maximum(np.asarray(t_sink_C, dtype="float64")
+                    - np.asarray(t_air_C, dtype="float64"), ASHP_DT_MIN)
+    return ASHP_CORRECTION * (ASHP_C0 + ASHP_C1 * dt + ASHP_C2 * dt ** 2)
+
+
+def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
+                            df_air, common_years, Installed_Capacity_kW):
+    """Compare LSWSHP and ASHP for each simulated year at Lake Schwerin.
+
+    Does NOT change any potential. It puts the constant COPs of the base case
+    (COP_Air, COP_Water) into the context of climate variability.
+
+    LSWSHP: hourly Lorenz COP; demand not covered by the lake is supplied by an
+            electric boiler (BACKUP_EFF), so both systems deliver the same heat.
+    ASHP:   hourly COP from air temperature (When2Heat), radiator heating curve
+            for space heating and 50 °C for domestic hot water.
+    Annual costs follow the annuity method of the EI (CAPEX sized as in the EI),
+    pipeline costs are identical for all years and therefore omitted.
+    """
+    print("\n" + "=" * 60)
+    print("  STEP 9: CLIMATE-YEAR COMPARISON LSWSHP vs. ASHP")
+    print("=" * 60)
+    print(f"  ASHP: When2Heat COP, radiator curve T_sink = {ASHP_SINK_SH_BASE:.0f} "
+          f"{ASHP_SINK_SH_SLOPE:+.1f}*T_air, DHW {ASHP_SINK_DHW:.0f} °C, "
+          f"correction {ASHP_CORRECTION}")
+
+    af_dec = _annuity_factor(cfg.wacc_decentral, cfg.lifetime)
+    af_cen = _annuity_factor(cfg.wacc_central, cfg.lifetime)
+
+    t_air = df_air["airtemp_C"]
+
+    rows = []
+    for year in common_years:
+        pot_yr = df_hourly[df_hourly.index.year == year]
+        dem_yr = demand_series[demand_series.index.year == year]
+        if len(pot_yr) == 0 or len(dem_yr) == 0:
+            continue
+        n = min(len(pot_yr), len(dem_yr), 8760)
+        idx = dem_yr.index[:n]
+        dem = dem_yr.values[:n]                               # consumer side [kW]
+        dlv = pot_yr["useful_kW"].values[:n]                   # deliverable [kW]
+        cop_w = pot_yr["COP"].values[:n]
+        ext = pot_yr["extractable"].values[:n]
+
+        # --- LSWSHP + electric backup ---
+        covered = np.minimum(dem, dlv)
+        deficit = dem - covered
+        el_hp = np.where(ext, covered * (1 + cfg.q_loss) / cop_w, 0.0)
+        el_backup = deficit * (1 + cfg.q_loss) / BACKUP_EFF
+        out_hp = covered * (1 + cfg.q_loss)
+        spf_w = out_hp.sum() / el_hp.sum() if el_hp.sum() > 0 else np.nan
+        spf_w_sys = dem.sum() * (1 + cfg.q_loss) / (el_hp.sum() + el_backup.sum())
+
+        # --- ASHP (decentral, no network losses) ---
+        ta = t_air.reindex(idx).interpolate(limit_direction="both").values
+        sh = demand_sh.reindex(idx).fillna(0).values
+        dhw = demand_dhw.reindex(idx).fillna(0).values
+        cop_sh = calc_cop_ashp(ta, ASHP_SINK_SH_BASE + ASHP_SINK_SH_SLOPE * ta)
+        cop_dhw = calc_cop_ashp(ta, np.full_like(ta, ASHP_SINK_DHW))
+        el_ashp = sh / cop_sh + dhw / cop_dhw
+        spf_a = dem.sum() / el_ashp.sum()
+
+        E_h = dem.sum()                                       # kWh/a
+        E_w = E_h * (1 + cfg.q_loss)
+        capex_a = cfg.CAPEX_Air * (E_h / cfg.hours_Air) * af_dec
+        capex_w = cfg.CAPEX_Water * (E_w / cfg.hours_Water) * af_cen
+
+        A_ashp = capex_a + cfg.c_el_L * el_ashp.sum()
+        A_lsw = capex_w + cfg.c_el_W * (el_hp.sum() + el_backup.sum())
+        # base case: constant COPs, no backup (as in the national EI)
+        A_ashp_base = capex_a + cfg.c_el_L * E_h / cfg.COP_Air
+        A_lsw_base = capex_w + cfg.c_el_W * E_w / cfg.COP_Water
+
+        rows.append({
+            "Year": year,
+            "Mean_T_air_C": round(float(np.mean(ta)), 2),
+            "SPF_ASHP": round(spf_a, 3),
+            "SPF_LSWSHP": round(spf_w, 3),
+            "SPF_LSWSHP_incl_backup": round(spf_w_sys, 3),
+            "Backup_share_pct": round(deficit.sum() / E_h * 100, 2),
+            "El_ASHP_GWh": round(el_ashp.sum() / 1e6, 3),
+            "El_LSWSHP_HP_GWh": round(el_hp.sum() / 1e6, 3),
+            "El_backup_GWh": round(el_backup.sum() / 1e6, 3),
+            "A_ASHP_MEUR": round(A_ashp / 1e6, 3),
+            "A_LSWSHP_MEUR": round(A_lsw / 1e6, 3),
+            "Advantage_MEUR": round((A_ashp - A_lsw) / 1e6, 3),
+            "Advantage_base_MEUR": round((A_ashp_base - A_lsw_base) / 1e6, 3),
+            # EI = advantage / pipeline annuity -> same factor applies to EI
+            "EI_factor": round((A_ashp - A_lsw) / (A_ashp_base - A_lsw_base), 3),
+        })
+
+    df = pd.DataFrame(rows)
+
+    print(f"\n  {'Year':<6}{'T_air':<8}{'SPF_A':<8}{'SPF_W':<8}{'SPF_W+B':<10}"
+          f"{'Backup%':<9}{'Adv.':<9}{'EI fac.':<8}")
+    print(f"  {'':6}{'[°C]':<8}{'':8}{'':8}{'':10}{'':9}{'[M€]':<9}{'':8}")
+    print(f"  {'-' * 66}")
+    for _, r in df.iterrows():
+        print(f"  {int(r['Year']):<6}{r['Mean_T_air_C']:<8.1f}{r['SPF_ASHP']:<8.2f}"
+              f"{r['SPF_LSWSHP']:<8.2f}{r['SPF_LSWSHP_incl_backup']:<10.2f}"
+              f"{r['Backup_share_pct']:<9.1f}{r['Advantage_MEUR']:<9.2f}{r['EI_factor']:<8.2f}")
+    print(f"  {'-' * 66}")
+    print(f"  Mean  SPF_ASHP {df['SPF_ASHP'].mean():.2f} (range {df['SPF_ASHP'].min():.2f}-"
+          f"{df['SPF_ASHP'].max():.2f}; base case COP_Air = {cfg.COP_Air})")
+    print(f"        SPF_LSWSHP {df['SPF_LSWSHP'].mean():.2f} (range {df['SPF_LSWSHP'].min():.2f}-"
+          f"{df['SPF_LSWSHP'].max():.2f}; base case COP_Water = {cfg.COP_Water})")
+    print(f"        EI factor {df['EI_factor'].mean():.2f} (range {df['EI_factor'].min():.2f}-"
+          f"{df['EI_factor'].max():.2f}; 1 = base case)")
+
+    csv_path = OUTPUT_DIR / "climate_year_comparison_ASHP_LSWSHP.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"  > Table saved: {csv_path}")
+
+    # --- Plot ---
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    x = df["Year"].values
+    ax = axes[0]
+    ax.plot(x, df["SPF_ASHP"], "o-", color="#c00000", lw=2, label="ASHP (SPF)")
+    ax.plot(x, df["SPF_LSWSHP"], "s-", color="#1f4e79", lw=2, label="LSWSHP (SPF)")
+    ax.axhline(cfg.COP_Air, color="#c00000", ls=":", lw=1.5, label=f"Base case COP ASHP = {cfg.COP_Air}")
+    ax.axhline(cfg.COP_Water, color="#1f4e79", ls=":", lw=1.5, label=f"Base case COP LSWSHP = {cfg.COP_Water}")
+    ax.set_ylabel("Seasonal performance factor SPF [-]")
+    ax.legend(loc="best", fontsize=12)
+    ax.text(-0.02, 1.05, "A", transform=ax.transAxes, fontsize=22, fontweight="bold",
+            va="bottom", ha="right")
+
+    ax = axes[1]
+    colors = np.where(df["EI_factor"] >= 1, "#228b22", "#dc143c")
+    ax.bar(x, df["EI_factor"], color=colors, alpha=0.8)
+    ax.axhline(1.0, color="black", ls="--", lw=1.5, label="Base case")
+    ax.set_ylabel("Cost advantage LSWSHP\nrelative to base case [-]")
+    ax.set_xlabel("Year")
+    ax.legend(loc="best", fontsize=12)
+    ax.text(-0.02, 1.05, "B", transform=ax.transAxes, fontsize=22, fontweight="bold",
+            va="bottom", ha="right")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "climate_year_comparison_ASHP_LSWSHP.svg", bbox_inches="tight")
+    plt.close(fig)
+    print("  > Plot saved: climate_year_comparison_ASHP_LSWSHP.svg")
+    return df
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -950,7 +1128,7 @@ def main():
           f"{ANNUAL_DEMAND_TOTAL_KWH:,.0f} kWh ({ANNUAL_DEMAND_TOTAL_KWH/1e6:.3f} GWh)")
     print(f"  >>> Corresponding Installed Capacity: {Installed_Capacity/1e3:.3f} MW")
 
-    demand_series = generate_demand_profile(
+    demand_series, demand_sh, demand_dhw = generate_demand_profile(
         ANNUAL_DEMAND_TOTAL_KWH, df_air, common_years
     )
 
@@ -1056,10 +1234,10 @@ def main():
         )
         lake_extracted_GWh = lake_extracted_kW.sum() / 1e6
 
-        # Seasonal COP: HP heat output / electricity, weighted by actual operation
+        # Seasonal performance factor (SPF): HP heat output / electricity, weighted by actual operation
         hp_output_kW = np.where(extractable, covered_kW * (1 + cfg.q_loss), 0.0)
         electricity_kW = np.where(extractable, hp_output_kW / cop, 0.0)
-        scop = hp_output_kW.sum() / electricity_kW.sum() if electricity_kW.sum() > 0 else np.nan
+        spf = hp_output_kW.sum() / electricity_kW.sum() if electricity_kW.sum() > 0 else np.nan
 
         annual_table_rows.append({
             "Year": year,
@@ -1073,14 +1251,14 @@ def main():
             "Coverage_pct": round(utilization_potential_GWh / total_demand_GWh * 100, 2),
             "Lake_Heat_Extracted_GWh": round(lake_extracted_GWh, 4),
             "Electricity_GWh": round(electricity_kW.sum() / 1e6, 4),
-            "SCOP": round(scop, 3),
+            "SPF": round(spf, 3),
         })
 
     df_annual_table = pd.DataFrame(annual_table_rows)
 
     # Print table
     print(f"\n  {'Year':<6}{'Useful':<10}{'Demand':<10}{'Deficit':<10}{'Def.lake':<10}"
-          f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<12}{'SCOP':<6}")
+          f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<12}{'SPF':<6}")
     print(f"  {'':6}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}"
           f"{'[GWh]':<10}{'[GWh]':<10}{'':8}{'[GWh]':<12}{'':6}")
     print(f"  {'-' * 92}")
@@ -1089,7 +1267,7 @@ def main():
               f"{row['Demand_GWh']:<10.2f}{row['Deficit_GWh']:<10.2f}"
               f"{row['Deficit_lake_GWh']:<10.2f}{row['Deficit_capacity_GWh']:<10.2f}"
               f"{row['Utilization_Potential_GWh']:<10.2f}{row['Coverage_pct']:<8.1f}"
-              f"{row['Lake_Heat_Extracted_GWh']:<12.2f}{row['SCOP']:<6.2f}")
+              f"{row['Lake_Heat_Extracted_GWh']:<12.2f}{row['SPF']:<6.2f}")
 
     # Mean values
     mean_lake_extracted = df_annual_table["Lake_Heat_Extracted_GWh"].mean()
@@ -1100,17 +1278,17 @@ def main():
     mean_def_lake = df_annual_table["Deficit_lake_GWh"].mean()
     mean_def_cap = df_annual_table["Deficit_capacity_GWh"].mean()
     mean_cov = df_annual_table["Coverage_pct"].mean()
-    # SCOP over all years (energy-weighted)
+    # SPF over all years (energy-weighted)
     hp_out_all = (df_annual_table["Utilization_Potential_GWh"] * (1 + cfg.q_loss)).sum()
-    scop_all = hp_out_all / df_annual_table["Electricity_GWh"].sum()
+    spf_all = hp_out_all / df_annual_table["Electricity_GWh"].sum()
 
     print(f"  {'-' * 92}")
     print(f"  {'Mean':<6}{mean_potential:<10.2f}{mean_demand:<10.2f}"
           f"{mean_deficit:<10.2f}{mean_def_lake:<10.2f}{mean_def_cap:<10.2f}"
-          f"{mean_utilization:<10.2f}{mean_cov:<8.1f}{mean_lake_extracted:<12.2f}{scop_all:<6.2f}")
-    print(f"\n  SCOP (Lorenz, eta_L = {LORENZ_EFF}, DH {T_SUPPLY_C:.0f}/{T_RETURN_C:.0f} °C): "
-          f"{scop_all:.2f}  (annual range {df_annual_table['SCOP'].min():.2f}"
-          f"-{df_annual_table['SCOP'].max():.2f}; national constant COP_Water = {cfg.COP_Water})")
+          f"{mean_utilization:<10.2f}{mean_cov:<8.1f}{mean_lake_extracted:<12.2f}{spf_all:<6.2f}")
+    print(f"\n  SPF (Lorenz, eta_L = {LORENZ_EFF}, DH {T_SUPPLY_C:.0f}/{T_RETURN_C:.0f} °C): "
+          f"{spf_all:.2f}  (annual range {df_annual_table['SPF'].min():.2f}"
+          f"-{df_annual_table['SPF'].max():.2f}; national constant COP_Water = {cfg.COP_Water})")
     if mean_deficit > 0:
         print(f"\n  Deficit share lake-limited:     {mean_def_lake / mean_deficit * 100:.1f}%")
         print(f"  Deficit share capacity-limited: {mean_def_cap / mean_deficit * 100:.1f}%")
@@ -1122,6 +1300,12 @@ def main():
     csv_path = OUTPUT_DIR / "annual_potential_demand_utilization.csv"
     df_annual_table.to_csv(csv_path, index=False)
     print(f"  > Table saved: {csv_path}")
+
+    # =========================================================
+    # STEP 9: Climate-year comparison LSWSHP vs. ASHP (appendix)
+    # =========================================================
+    climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
+                            df_air, common_years, Installed_Capacity_kW)
 
     # =========================================================
     # Save combined results

@@ -1,4 +1,4 @@
-Year,Useful_Heat_GWh,Demand_GWh,Deficit_GWh,Deficit_lake_GWh,Deficit_capacity_GWh,Hours_no_extraction,Utilization_Potential_GWh,Coverage_pct,Lake_Heat_Extracted_GWh,Electricity_GWh,SCOP
+Year,Useful_Heat_GWh,Demand_GWh,Deficit_GWh,Deficit_lake_GWh,Deficit_capacity_GWh,Hours_no_extraction,Utilization_Potential_GWh,Coverage_pct,Lake_Heat_Extracted_GWh,Electricity_GWh,SPF
 1995,163.8022,67.7966,1.2445,1.2342,0.0103,0,66.5521,98.16,51.7753,22.763,3.275
 1996,123.4911,67.4321,29.0391,29.0391,0.0,1913,38.3931,56.94,30.1405,12.8598,3.344
 1997,146.862,67.7956,13.8095,13.8029,0.0067,666,53.9861,79.63,42.1721,18.2924,3.305
