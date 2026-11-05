@@ -9,6 +9,7 @@ Combined Analysis: Lake Thermal Potential vs. District Heating Demand
 """
 
 from pathlib import Path
+import inspect
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -50,6 +51,9 @@ COP_C1 = 6.7
 COP_C2 = 0.03697
 COP_C3 = -0.03697
 COP_C4 = 1.605e-7
+
+# Year shown in the detailed plots (None = most representative outage year)
+SELECTED_YEAR_OVERRIDE = 2017
 
 # Demand profile parameters
 BUILDING_TYPE = "MFH"
@@ -291,11 +295,18 @@ def analyse_outages(df_hourly, complete_years):
 # STEP 4: DEMAND PROFILE GENERATION
 # ============================================================
 
+_DEMANDLIB_HAS_WW_ONLY = "ww_only" in inspect.getsource(bdew.HeatBuilding)
+
+
 def generate_demand_profile(annual_demand_kWh, air_temp_df, target_years):
-    """Generate BDEW heating demand profile scaled to annual_demand_kWh."""
+    """Generate BDEW demand profile: space heating (85 %) + hot water (15 %)."""
     print("\n" + "=" * 60)
     print("  STEP 4: DEMAND PROFILE GENERATION")
     print("=" * 60)
+    if _DEMANDLIB_HAS_WW_ONLY:
+        print("  Hot water: BDEW profile (ww_only=True)")
+    else:
+        print("  Hot water: demandlib without ww_only -> constant profile used")
     print(f"  Annual demand (from static potential): {annual_demand_kWh:,.0f} kWh")
     print(f"  = {annual_demand_kWh/1e6:.2f} GWh")
 
@@ -322,17 +333,23 @@ def generate_demand_profile(annual_demand_kWh, air_temp_df, target_years):
             ww_incl=False,
         ).get_bdew_profile()
 
-        hotwater = bdew.HeatBuilding(
-            year_data.index,
-            holidays=holidays_dict,
-            temperature=year_data["airtemp_C"],
-            shlp_type=BUILDING_TYPE,
-            building_class=BUILDING_CLASS,
-            wind_class=WIND_CLASS,
-            annual_heat_demand=hw_demand,
-            name="hotwater",
-            ww_incl=True,
-        ).get_bdew_profile()
+        # ww_incl=True would return heating INCLUDING hot water (seasonal shape).
+        # Pure hot water needs ww_only=True (newer demandlib versions only).
+        if _DEMANDLIB_HAS_WW_ONLY:
+            hotwater = bdew.HeatBuilding(
+                year_data.index,
+                holidays=holidays_dict,
+                temperature=year_data["airtemp_C"],
+                shlp_type=BUILDING_TYPE,
+                building_class=BUILDING_CLASS,
+                wind_class=WIND_CLASS,
+                annual_heat_demand=hw_demand,
+                name="hotwater",
+                ww_only=True,
+            ).get_bdew_profile()
+        else:
+            # Fallback: constant hot-water load over the year
+            hotwater = pd.Series(hw_demand / len(year_data), index=year_data.index)
 
         combined = heating + hotwater
         combined.name = "demand_kW"
@@ -445,7 +462,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     # ----------------------------------------------------------------
     ax = axes[1]
     ax.fill_between(hoy, potential_kW / 1000, color=COLOR_POTENTIAL, alpha=0.45, lw=0,
-                    label=f"Lake-based useful heat (peak: {potential_kW.max()/1000:.2f} MW)")
+                    label=f"Capped at installed capacity (peak: {potential_kW.max()/1000:.2f} MW)")
     ax.plot(hoy, demand_kW / 1000, lw=0.6, color=COLOR_DEMAND,
             label=f"Heating demand (peak: {demand_kW.max()/1000:.2f} MW)")
 
@@ -478,7 +495,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     ax.fill_between(hoy, deficit, color=COLOR_BALANCE_NEG, alpha=0.5, lw=0,
                     label="Deficit")
     ax.axhline(0, color="black", lw=1.0)
-    ax.set_ylabel("Balance [MW]\n(Potential \u2212 Demand)")
+    ax.set_ylabel("Balance [MW]\n(Useful heat \u2212 Demand)")
     ax.legend(loc="upper right")
 
     # Subplot label (C)
@@ -555,12 +572,15 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     deficit_hours = int(deficit_mask.sum())
     total_deficit_kWh = np.where(balance_kW < 0, -balance_kW, 0).sum()
     total_surplus_kWh = np.where(balance_kW > 0, balance_kW, 0).sum()
-    coverage_overall = min(total_potential_GWh / total_demand_GWh * 100, 100)
+    # Time-resolved coverage: only demand met in the same hour counts
+    covered_GWh = np.minimum(potential_kW, demand_kW).sum() / 1e6
+    coverage_overall = covered_GWh / total_demand_GWh * 100
 
     print(f"\n  --- Year {selected_year} Summary ---")
     print(f"  Total useful heat:   {total_potential_GWh:.2f} GWh")
     print(f"  Total demand:        {total_demand_GWh:.2f} GWh")
-    print(f"  Overall coverage:    {coverage_overall:.1f}%")
+    print(f"  Covered demand:      {covered_GWh:.2f} GWh")
+    print(f"  Overall coverage:    {coverage_overall:.1f}% (hourly)")
     print(f"  Hours with deficit:  {deficit_hours} h ({deficit_hours/87.6:.1f}%)")
     print(f"  Total deficit:       {total_deficit_kWh/1e6:.2f} GWh")
     print(f"  Total surplus:       {total_surplus_kWh/1e6:.2f} GWh")
@@ -572,6 +592,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
         "year": selected_year,
         "useful_heat_GWh": total_potential_GWh,
         "demand_GWh": total_demand_GWh,
+        "covered_GWh": covered_GWh,
         "coverage_pct": coverage_overall,
         "deficit_hours": deficit_hours,
         "deficit_GWh": total_deficit_kWh / 1e6,
@@ -584,7 +605,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 # ============================================================
 
 def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
-    """Heatmap: daily energy coverage (potential/demand) over all years, capped at 100%."""
+    """Heatmap: daily share of demand covered hour by hour (0-100 %), all years."""
     print("\n" + "=" * 60)
     print("  STEP 6: HEATMAP - Daily Energy Coverage (all years)")
     print("=" * 60)
@@ -610,11 +631,12 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
             mask_d = doy == d
             if not mask_d.any():
                 continue
-            pot_day_kWh = pot_kW[mask_d].sum()
+            # covered = demand met hour by hour (no shifting within the day)
+            covered_day_kWh = np.minimum(pot_kW[mask_d], dem_kW[mask_d]).sum()
             dem_day_kWh = dem_kW[mask_d].sum()
 
             if dem_day_kWh > 0:
-                coverage_matrix_raw[i, d] = pot_day_kWh / dem_day_kWh * 100
+                coverage_matrix_raw[i, d] = covered_day_kWh / dem_day_kWh * 100
             else:
                 coverage_matrix_raw[i, d] = 100.0
 
@@ -885,7 +907,7 @@ def main():
     print("=" * 60)
     print(f"  Mean hourly COP (extractable hours): {mean_cop_extractable:.3f}")
     print(f"  Mean annual lake heat extracted:    {mean_lake_heat_GWh_yr:.3f} GWh/yr")
-    print(f"  Mean annual useful heat:             {mean_useful_heat_GWh_yr:.3f} GWh/yr")
+    print(f"  Mean annual useful heat (uncapped):  {mean_useful_heat_GWh_yr:.3f} GWh/yr")
 
     # =========================================================
     # STEP 3: Outage analysis
@@ -893,9 +915,6 @@ def main():
     outage_info = analyse_outages(df_hourly, complete_years_lake)
 
     # =========================================================
-    # STEP 4: Generate demand profile using fixed economic potential
-    # =========================================================
-        # =========================================================
     # STEP 4: Generate demand profile using economic potential from CSV
     # =========================================================
     economic_csv_path = Path("Data/Processed/economic_potential_comparison.csv")
@@ -926,6 +945,7 @@ def main():
           f"{Installed_Capacity_kW/1e3:.3f} MW ({Installed_Capacity_kW:.1f} kW)")
 
     pre_cap_peak = df_hourly["useful_kW"].max()
+    df_hourly["useful_uncapped_kW"] = df_hourly["useful_kW"]  # lake limit only
     df_hourly["useful_kW"] = df_hourly["useful_kW"].clip(upper=Installed_Capacity_kW)
     post_cap_peak = df_hourly["useful_kW"].max()
 
@@ -944,10 +964,14 @@ def main():
     if len(years_with_outages) > 0:
         mean_outage_hours = years_with_outages["hours_outage"].mean()
         closest_idx = (years_with_outages["hours_outage"] - mean_outage_hours).abs().idxmin()
-        selected_year = 2017
-        closest_hours = int(years_with_outages.loc[closest_idx, "hours_outage"])
+        # Representative year: outage hours closest to the mean of all outage years
+        selected_year = int(years_with_outages.loc[closest_idx, "year"])
+        if SELECTED_YEAR_OVERRIDE is not None:
+            selected_year = SELECTED_YEAR_OVERRIDE
+        sel_hours = int(df_annual_common.loc[
+            df_annual_common["year"] == selected_year, "hours_outage"].iloc[0])
         print(f"\n  >>> Selected year: {selected_year} "
-              f"({closest_hours} h outage, mean: {mean_outage_hours:.0f} h)")
+              f"({sel_hours} h outage, mean of outage years: {mean_outage_hours:.0f} h)")
     else:
         median_idx = (df_annual_common["constrained_potential_GWh"] -
                       df_annual_common["constrained_potential_GWh"].median()).abs().idxmin()
@@ -988,6 +1012,7 @@ def main():
 
         n = min(len(pot_yr), len(dem_yr), 8760)
         pot_kW = pot_yr["useful_kW"].values[:n]
+        unc_kW = pot_yr["useful_uncapped_kW"].values[:n]
         dem_kW = dem_yr.values[:n]
 
         cop = pot_yr["COP"].values[:n]
@@ -997,6 +1022,15 @@ def main():
         total_demand_GWh = dem_kW.sum() / 1e6
         total_deficit_GWh = np.maximum(0, dem_kW - pot_kW).sum() / 1e6
         utilization_potential_GWh = total_demand_GWh - total_deficit_GWh
+
+        # Deficit attribution (sums to total deficit):
+        #   lake:     demand the lake cannot supply even with unlimited HP capacity
+        #   capacity: demand the lake could supply but exceeds installed HP capacity
+        deficit_lake_kW = np.maximum(0, dem_kW - unc_kW)
+        deficit_cap_kW = np.maximum(0, np.minimum(dem_kW, unc_kW) - Installed_Capacity_kW)
+        deficit_lake_GWh = deficit_lake_kW.sum() / 1e6
+        deficit_cap_GWh = deficit_cap_kW.sum() / 1e6
+        hours_no_extraction_deficit = int(((~extractable) & (dem_kW > 0)).sum())
 
         # Source side: lake heat actually extracted to supply the covered demand
         covered_kW = np.minimum(dem_kW, pot_kW)
@@ -1010,21 +1044,28 @@ def main():
             "Useful_Heat_GWh": round(total_potential_GWh, 4),
             "Demand_GWh": round(total_demand_GWh, 4),
             "Deficit_GWh": round(total_deficit_GWh, 4),
+            "Deficit_lake_GWh": round(deficit_lake_GWh, 4),
+            "Deficit_capacity_GWh": round(deficit_cap_GWh, 4),
+            "Hours_no_extraction": hours_no_extraction_deficit,
             "Utilization_Potential_GWh": round(utilization_potential_GWh, 4),
+            "Coverage_pct": round(utilization_potential_GWh / total_demand_GWh * 100, 2),
             "Lake_Heat_Extracted_GWh": round(lake_extracted_GWh, 4),
         })
 
     df_annual_table = pd.DataFrame(annual_table_rows)
 
     # Print table
-    print(f"\n  {'Year':<6}{'Useful heat':<14}{'Demand':<12}{'Deficit':<12}{'Utilization':<14}{'Lake extr.':<12}")
-    print(f"  {'':6}{'[GWh]':<14}{'[GWh]':<12}{'[GWh]':<12}{'[GWh]':<14}{'[GWh]':<12}")
-    print(f"  {'-' * 70}")
+    print(f"\n  {'Year':<6}{'Useful':<10}{'Demand':<10}{'Deficit':<10}{'Def.lake':<10}"
+          f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<10}")
+    print(f"  {'':6}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}"
+          f"{'[GWh]':<10}{'[GWh]':<10}{'':8}{'[GWh]':<10}")
+    print(f"  {'-' * 84}")
     for _, row in df_annual_table.iterrows():
-        print(f"  {int(row['Year']):<6}{row['Useful_Heat_GWh']:<14.4f}"
-              f"{row['Demand_GWh']:<12.4f}{row['Deficit_GWh']:<12.4f}"
-              f"{row['Utilization_Potential_GWh']:<14.4f}"
-              f"{row['Lake_Heat_Extracted_GWh']:<12.4f}")
+        print(f"  {int(row['Year']):<6}{row['Useful_Heat_GWh']:<10.2f}"
+              f"{row['Demand_GWh']:<10.2f}{row['Deficit_GWh']:<10.2f}"
+              f"{row['Deficit_lake_GWh']:<10.2f}{row['Deficit_capacity_GWh']:<10.2f}"
+              f"{row['Utilization_Potential_GWh']:<10.2f}{row['Coverage_pct']:<8.1f}"
+              f"{row['Lake_Heat_Extracted_GWh']:<10.2f}")
 
     # Mean values
     mean_lake_extracted = df_annual_table["Lake_Heat_Extracted_GWh"].mean()
@@ -1032,13 +1073,20 @@ def main():
     mean_demand = df_annual_table["Demand_GWh"].mean()
     mean_deficit = df_annual_table["Deficit_GWh"].mean()
     mean_utilization = df_annual_table["Utilization_Potential_GWh"].mean()
+    mean_def_lake = df_annual_table["Deficit_lake_GWh"].mean()
+    mean_def_cap = df_annual_table["Deficit_capacity_GWh"].mean()
+    mean_cov = df_annual_table["Coverage_pct"].mean()
 
-    print(f"  {'-' * 70}")
-    print(f"  {'Mean':<6}{mean_potential:<14.4f}{mean_demand:<12.4f}"
-          f"{mean_deficit:<12.4f}{mean_utilization:<14.4f}{mean_lake_extracted:<12.4f}")
+    print(f"  {'-' * 84}")
+    print(f"  {'Mean':<6}{mean_potential:<10.2f}{mean_demand:<10.2f}"
+          f"{mean_deficit:<10.2f}{mean_def_lake:<10.2f}{mean_def_cap:<10.2f}"
+          f"{mean_utilization:<10.2f}{mean_cov:<8.1f}{mean_lake_extracted:<10.2f}")
+    if mean_deficit > 0:
+        print(f"\n  Deficit share lake-limited:     {mean_def_lake / mean_deficit * 100:.1f}%")
+        print(f"  Deficit share capacity-limited: {mean_def_cap / mean_deficit * 100:.1f}%")
 
     print(f"\n  >>> Mean Utilization Potential: {mean_utilization:.4f} GWh/yr "
-          f"({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of economic potential)")
+          f"({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of annual demand / economic potential)")
 
     # Save as CSV
     csv_path = OUTPUT_DIR / "annual_potential_demand_utilization.csv"
