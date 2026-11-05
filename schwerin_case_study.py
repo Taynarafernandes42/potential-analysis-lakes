@@ -45,12 +45,13 @@ DELTA_T_TECH = cfg.deltaT_technical_extractable
 DELTA_T_HEX_MAX = 5.0
 T_MIN_EXTRACTION = 3.0
 
-# COP parameters
-T_SUPPLY_C = 90.0
-COP_C1 = 6.7
-COP_C2 = 0.03697
-COP_C3 = -0.03697
-COP_C4 = 1.605e-7
+# COP parameters: Lorenz-efficiency approach (Pieper et al. 2019/2020)
+#   COP(t) = eta_L * T_H,lm / (T_H,lm - T_C,lm(t))
+#   T_H,lm : log-mean sink temperature (DH supply / return)
+#   T_C,lm : log-mean source temperature (lake inlet / heat-exchanger outlet)
+T_SUPPLY_C = 75.0     # DH supply temperature [°C] (manuscript: 75-80 °C)
+T_RETURN_C = 40.0     # DH return temperature [°C]
+LORENZ_EFF = 0.5      # Lorenz efficiency eta_L [-] (Pieper et al.: 0.5 literature value)
 
 # Year shown in the detailed plots (None = most representative outage year)
 SELECTED_YEAR_OVERRIDE = 2017
@@ -94,10 +95,26 @@ def calc_delta_t_hex(lake_temp_C: np.ndarray) -> np.ndarray:
     )
 
 
-def calc_cop(lake_temp_C: np.ndarray) -> np.ndarray:
-    """Calculate COP based on lake temperature and supply temperature."""
+def _log_mean_K(t_in_C, t_out_C):
+    """Logarithmic mean temperature [K] of a stream from t_in to t_out [°C]."""
+    a = np.asarray(t_in_C, dtype="float64") + 273.15
+    b = np.asarray(t_out_C, dtype="float64") + 273.15
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lm = (a - b) / np.log(a / b)
+    return np.where(np.abs(a - b) < 1e-6, a, lm)
+
+
+def calc_cop(lake_temp_C: np.ndarray, delta_t_hex: np.ndarray) -> np.ndarray:
+    """Hourly COP from the Lorenz cycle with a constant Lorenz efficiency.
+
+    Source: lake water cooled from T_lake to T_lake - deltaT_hex.
+    Sink:   district heating water heated from T_RETURN_C to T_SUPPLY_C.
+    """
     t = np.asarray(lake_temp_C, dtype="float64")
-    return COP_C1 + COP_C2 * t + COP_C3 * T_SUPPLY_C + COP_C4 * t * T_SUPPLY_C
+    dt = np.asarray(delta_t_hex, dtype="float64")
+    t_h = _log_mean_K(T_SUPPLY_C, T_RETURN_C)
+    t_c = _log_mean_K(t, t - dt)
+    return LORENZ_EFF * t_h / (t_h - t_c)
 
 
 def set_month_xaxis(axes):
@@ -172,7 +189,7 @@ def compute_hourly_potential(lake_vol_km3, df_lake, complete_years):
     df = df_lake.copy()
     df["deltaT_hex"] = calc_delta_t_hex(df["temp_C"].values)
     df["extractable"] = df["deltaT_hex"] > 0
-    df["COP"] = calc_cop(df["temp_C"].values)
+    df["COP"] = calc_cop(df["temp_C"].values, df["deltaT_hex"].values)
 
     df["capacity_kW"] = np.where(
         df["extractable"],
@@ -1039,6 +1056,11 @@ def main():
         )
         lake_extracted_GWh = lake_extracted_kW.sum() / 1e6
 
+        # Seasonal COP: HP heat output / electricity, weighted by actual operation
+        hp_output_kW = np.where(extractable, covered_kW * (1 + cfg.q_loss), 0.0)
+        electricity_kW = np.where(extractable, hp_output_kW / cop, 0.0)
+        scop = hp_output_kW.sum() / electricity_kW.sum() if electricity_kW.sum() > 0 else np.nan
+
         annual_table_rows.append({
             "Year": year,
             "Useful_Heat_GWh": round(total_potential_GWh, 4),
@@ -1050,22 +1072,24 @@ def main():
             "Utilization_Potential_GWh": round(utilization_potential_GWh, 4),
             "Coverage_pct": round(utilization_potential_GWh / total_demand_GWh * 100, 2),
             "Lake_Heat_Extracted_GWh": round(lake_extracted_GWh, 4),
+            "Electricity_GWh": round(electricity_kW.sum() / 1e6, 4),
+            "SCOP": round(scop, 3),
         })
 
     df_annual_table = pd.DataFrame(annual_table_rows)
 
     # Print table
     print(f"\n  {'Year':<6}{'Useful':<10}{'Demand':<10}{'Deficit':<10}{'Def.lake':<10}"
-          f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<10}")
+          f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<12}{'SCOP':<6}")
     print(f"  {'':6}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}"
-          f"{'[GWh]':<10}{'[GWh]':<10}{'':8}{'[GWh]':<10}")
-    print(f"  {'-' * 84}")
+          f"{'[GWh]':<10}{'[GWh]':<10}{'':8}{'[GWh]':<12}{'':6}")
+    print(f"  {'-' * 92}")
     for _, row in df_annual_table.iterrows():
         print(f"  {int(row['Year']):<6}{row['Useful_Heat_GWh']:<10.2f}"
               f"{row['Demand_GWh']:<10.2f}{row['Deficit_GWh']:<10.2f}"
               f"{row['Deficit_lake_GWh']:<10.2f}{row['Deficit_capacity_GWh']:<10.2f}"
               f"{row['Utilization_Potential_GWh']:<10.2f}{row['Coverage_pct']:<8.1f}"
-              f"{row['Lake_Heat_Extracted_GWh']:<10.2f}")
+              f"{row['Lake_Heat_Extracted_GWh']:<12.2f}{row['SCOP']:<6.2f}")
 
     # Mean values
     mean_lake_extracted = df_annual_table["Lake_Heat_Extracted_GWh"].mean()
@@ -1076,11 +1100,17 @@ def main():
     mean_def_lake = df_annual_table["Deficit_lake_GWh"].mean()
     mean_def_cap = df_annual_table["Deficit_capacity_GWh"].mean()
     mean_cov = df_annual_table["Coverage_pct"].mean()
+    # SCOP over all years (energy-weighted)
+    hp_out_all = (df_annual_table["Utilization_Potential_GWh"] * (1 + cfg.q_loss)).sum()
+    scop_all = hp_out_all / df_annual_table["Electricity_GWh"].sum()
 
-    print(f"  {'-' * 84}")
+    print(f"  {'-' * 92}")
     print(f"  {'Mean':<6}{mean_potential:<10.2f}{mean_demand:<10.2f}"
           f"{mean_deficit:<10.2f}{mean_def_lake:<10.2f}{mean_def_cap:<10.2f}"
-          f"{mean_utilization:<10.2f}{mean_cov:<8.1f}{mean_lake_extracted:<10.2f}")
+          f"{mean_utilization:<10.2f}{mean_cov:<8.1f}{mean_lake_extracted:<12.2f}{scop_all:<6.2f}")
+    print(f"\n  SCOP (Lorenz, eta_L = {LORENZ_EFF}, DH {T_SUPPLY_C:.0f}/{T_RETURN_C:.0f} °C): "
+          f"{scop_all:.2f}  (annual range {df_annual_table['SCOP'].min():.2f}"
+          f"-{df_annual_table['SCOP'].max():.2f}; national constant COP_Water = {cfg.COP_Water})")
     if mean_deficit > 0:
         print(f"\n  Deficit share lake-limited:     {mean_def_lake / mean_deficit * 100:.1f}%")
         print(f"  Deficit share capacity-limited: {mean_def_cap / mean_deficit * 100:.1f}%")
