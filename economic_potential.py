@@ -617,6 +617,104 @@ def _print_base_case_summary(cfg, compare_df, ei_data, hylak_data, heat_data):
 
 
 # ============================================================
+# Minimum project size (applied at the end of the assessment)
+# ============================================================
+
+def _hp_capacity_kW(cfg, covered_GWh):
+    """Heat-pump thermal output capacity per lake [kW] (same sizing as CAPEX in the EI)."""
+    return covered_GWh * 1e6 * (1 + cfg.q_loss) / cfg.hours_Water
+
+
+def apply_min_project_size(cfg, compare_df):
+    """Final step: exclude lakes whose project would be smaller than the minimum size.
+
+    All previous steps (EI, demand matching, sensitivity) are computed without this
+    threshold. Lakes below it keep their values in Covered_Heat_GWh, but contribute
+    zero to the final Economic_Potential_GWh.
+    """
+    df = compare_df.copy()
+    df["HP_Capacity_kW"] = _hp_capacity_kW(cfg, df["Covered_Heat_GWh"])
+    df["Above_Min_Size"] = df["HP_Capacity_kW"] >= cfg.min_project_capacity_kW
+    df["Economic_Potential_GWh"] = np.where(df["Above_Min_Size"], df["Covered_Heat_GWh"], 0.0)
+
+    has_pot = df["Covered_Heat_GWh"] > 0
+    n_before = int(has_pot.sum())
+    n_after = int((has_pot & df["Above_Min_Size"]).sum())
+    pot_before = df["Covered_Heat_GWh"].sum() / 1000.0
+    pot_after = df["Economic_Potential_GWh"].sum() / 1000.0
+    cap = df.loc[has_pot, "HP_Capacity_kW"]
+
+    print("\n" + "=" * 65)
+    print(f"  MINIMUM PROJECT SIZE  (>= {cfg.min_project_capacity_kW:.0f} kW, "
+          f"FLH = {cfg.hours_Water} h)")
+    print("=" * 65)
+    print(f"  HP capacity per lake  median / mean / max: "
+          f"{cap.median():,.0f} kW / {cap.mean():,.0f} kW / {cap.max()/1000:,.1f} MW")
+    print(f"  Lakes with economic potential:  {n_before:>6} -> {n_after:>6} "
+          f"({n_after / n_before * 100 if n_before else 0:.1f}%)")
+    print(f"  Economic potential [TWh/yr]:    {pot_before:>6.2f} -> {pot_after:>6.2f} "
+          f"({pot_after / pot_before * 100 if pot_before else 0:.1f}%)")
+    print(f"  Lake heat extracted [TWh/yr]:   "
+          f"{df['Lake_Heat_Extracted_GWh'].sum()/1000:>6.2f} -> "
+          f"{df.loc[df['Above_Min_Size'], 'Lake_Heat_Extracted_GWh'].sum()/1000:>6.2f}")
+    print("=" * 65 + "\n")
+
+    df.to_csv(cfg.economic_compare_csv, index=False)
+    return df
+
+
+def plot_project_size_distribution(cfg, compare_df):
+    """Histogram of HP capacity per lake, split by limiting factor, with minimum size."""
+    df = compare_df[compare_df["Covered_Heat_GWh"] > 0].copy()
+    if df.empty:
+        return
+    cap_MW = df["HP_Capacity_kW"] / 1000.0
+    limited_by = np.where(df["Covered_Heat_GWh"] >= df["Heat_EI_ge1_GWh"] - 1e-9,
+                          "demand", "lake")
+    thr_MW = cfg.min_project_capacity_kW / 1000.0
+    lang = cfg.plot_language
+
+    plt.rcParams.update({"font.size": 14, "font.family": "serif", "mathtext.fontset": "cm"})
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    bins = np.logspace(np.log10(max(cap_MW.min(), 1e-4)), np.log10(cap_MW.max()), 40)
+    groups = [("lake", "#1976d2"), ("demand", "#f58220")]
+    if lang == "en":
+        labels = [f"{g}-limited (n={int((limited_by == g).sum())})" for g, _ in groups]
+    else:
+        names = {"lake": "potenzialbegrenzt", "demand": "bedarfsbegrenzt"}
+        labels = [f"{names[g]} (n={int((limited_by == g).sum())})" for g, _ in groups]
+    ax.hist([cap_MW[limited_by == g] for g, _ in groups], bins=bins, stacked=True,
+            color=[c for _, c in groups], label=labels)
+
+    ax.axvspan(bins[0], thr_MW, color="grey", alpha=0.15, zorder=0)
+    n_after = int((cap_MW >= thr_MW).sum())
+    pot_share = df.loc[cap_MW >= thr_MW, "Covered_Heat_GWh"].sum() / df["Covered_Heat_GWh"].sum() * 100
+    thr_label = (f"min. project size {cfg.min_project_capacity_kW:.0f} kW: "
+                 f"{n_after} lakes, {pot_share:.0f}% of potential")
+    if lang != "en":
+        thr_label = (f"Mindestgröße {cfg.min_project_capacity_kW:.0f} kW: "
+                     f"{n_after} Seen, {pot_share:.0f}% des Potenzials")
+    ax.axvline(thr_MW, color="k", ls="--", lw=1.8, label=thr_label)
+
+    ax.set_xscale("log")
+    xlabel = (f"Heat-pump capacity per lake [MW]  (FLH = {cfg.hours_Water} h)" if lang == "en"
+              else f"Wärmepumpenleistung je See [MW]  (VLS = {cfg.hours_Water} h)")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Number of lakes" if lang == "en" else "Anzahl Seen")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=11, loc="upper right")
+    plt.tight_layout()
+
+    out = Path(cfg.project_size_plot_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out, dpi=300, bbox_inches="tight")
+    plt.savefig(out.with_suffix(".svg"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Project size plot saved: {out}")
+
+
+# ============================================================
 # Plots
 # ============================================================
 
@@ -707,14 +805,18 @@ def plot_map(cfg, compare_df):
         states_gdf["NUTS_CODE"] = states_gdf["NUTS_CODE"].astype(str)
         states_gdf = states_gdf[states_gdf["NUTS_CODE"].str[:3].isin(cfg.nuts1_filter)]
 
+    # Final economic potential (after minimum project size) if available
+    val_col = "Economic_Potential_GWh" if "Economic_Potential_GWh" in compare_df.columns \
+        else "Covered_Heat_GWh"
+
     # Merge comparison data with lake geometries
     df = compare_df.copy()
     df["Hylak_id"] = df["Hylak_id"].astype(int)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
     lakes_with_data = lakes_gdf.merge(
-        df[["Hylak_id", "Covered_Heat_GWh"]], on="Hylak_id", how="left"
+        df[["Hylak_id", val_col]], on="Hylak_id", how="left"
     )
-    lakes_with_data["Covered_Heat_GWh"] = lakes_with_data["Covered_Heat_GWh"].fillna(0)
+    lakes_with_data[val_col] = lakes_with_data[val_col].fillna(0)
     lakes_with_data["centroid"] = lakes_with_data.geometry.centroid
 
     if cfg.nuts1_filter:
@@ -726,7 +828,7 @@ def plot_map(cfg, compare_df):
             lakes_with_data = lakes_with_data.drop(columns="index_right")
 
     # Highlight districts containing lakes with economic potential
-    relevant = lakes_with_data[lakes_with_data["Covered_Heat_GWh"] > 0.0001]
+    relevant = lakes_with_data[lakes_with_data[val_col] > 0.0001]
     name_col = next((c for c in ["NUTS_NAME", "GEN", "NAME_3", "NAME"]
                      if c in states_gdf.columns), None)
 
@@ -734,7 +836,7 @@ def plot_map(cfg, compare_df):
         if "index_right" in relevant.columns:
             relevant = relevant.drop(columns="index_right")
         joined = gpd.sjoin(relevant, states_gdf[[name_col, "geometry"]], how="inner", predicate="intersects")
-        agg = joined.groupby(name_col)["Covered_Heat_GWh"].sum().reset_index()
+        agg = joined.groupby(name_col)[val_col].sum().reset_index()
         agg.columns = [name_col, "Total_GWh"]
         states_gdf = states_gdf.merge(agg, on=name_col, how="left")
         states_gdf["Total_GWh"] = states_gdf["Total_GWh"].fillna(0)
@@ -757,7 +859,7 @@ def plot_map(cfg, compare_df):
     scale_factor = 2500
 
     for _, row in lakes_with_data.iterrows():
-        val = row["Covered_Heat_GWh"]
+        val = row[val_col]
         if val <= 0 or row["centroid"] is None:
             continue
         x, y = row["centroid"].x, row["centroid"].y
@@ -1139,10 +1241,6 @@ def calculate(cfg):
     print("  Plotting EI scatter...")
     plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask, actual_dist_data)
 
-    # 7. Map plot
-    print("  Plotting economic potential map...")
-    plot_map(cfg, compare_df)
-
     # 8. Sensitivity analysis (with cache)
     if cfg.run_economic_sensitivity:
         sens_csv_path = Path(cfg.economic_sensitivity_csv)
@@ -1170,5 +1268,13 @@ def calculate(cfg):
             print(f"  Sensitivity results cached: {sens_csv_path}")
 
         plot_sensitivity(cfg, df_sens, params_base)
+
+    # 9. Minimum project size (final step, all results above are without threshold)
+    compare_df = apply_min_project_size(cfg, compare_df)
+    plot_project_size_distribution(cfg, compare_df)
+
+    # 10. Map plot (final economic potential incl. minimum project size)
+    print("  Plotting economic potential map...")
+    plot_map(cfg, compare_df)
 
     return compare_df

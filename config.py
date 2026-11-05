@@ -89,6 +89,12 @@ class Config:
     # EI threshold for "economically viable"
     ei_threshold = 1.0
 
+    # Minimum project size, applied at the very end of the economic assessment.
+    # Below this heat-pump capacity the cost assumptions (large-scale LSWSHP,
+    # central financing, district heating) are no longer valid.
+    # Capacity = Covered_Heat * (1 + q_loss) / hours_Water  (HP thermal output)
+    min_project_capacity_kW = 100.0
+
     # Computation
     n_jobs = 4
 
@@ -150,6 +156,10 @@ class Config:
     @property
     def economic_map_plot_path(self):
         return str(Path(self.results_dir) / "Economic_Potential_Map.pdf")
+
+    @property
+    def project_size_plot_path(self):
+        return str(Path(self.results_dir) / "Project_Size_Distribution.pdf")
 
     @property
     def economic_sensitivity_plot_path(self):

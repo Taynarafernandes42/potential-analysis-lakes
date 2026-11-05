@@ -49,11 +49,14 @@ def plot_combined_map(cfg, lakes_theoretical, compare_df):
     lakes_gdf = read_lakes(cfg, target_crs)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
     compare_df = compare_df.copy()
+    # Final economic potential (after minimum project size) if available
+    val_col = "Economic_Potential_GWh" if "Economic_Potential_GWh" in compare_df.columns \
+        else "Covered_Heat_GWh"
     compare_df["Hylak_id"] = compare_df["Hylak_id"].astype(int)
     lakes_economic = lakes_gdf.merge(
-        compare_df[["Hylak_id", "Covered_Heat_GWh"]], on="Hylak_id", how="left"
+        compare_df[["Hylak_id", val_col]], on="Hylak_id", how="left"
     )
-    lakes_economic["Covered_Heat_GWh"] = lakes_economic["Covered_Heat_GWh"].fillna(0)
+    lakes_economic[val_col] = lakes_economic[val_col].fillna(0)
 
     if cfg.nuts1_filter:
         lakes_economic = gpd.sjoin(
@@ -65,7 +68,7 @@ def plot_combined_map(cfg, lakes_theoretical, compare_df):
 
     # --- Compute district highlighting for economic panel ---
     states_econ = states_gdf.copy()
-    relevant = lakes_economic[lakes_economic["Covered_Heat_GWh"] > 0.0001]
+    relevant = lakes_economic[lakes_economic[val_col] > 0.0001]
     name_col = next((c for c in ["NUTS_NAME", "GEN", "NAME_3", "NAME"]
                      if c in states_econ.columns), None)
 
@@ -75,7 +78,7 @@ def plot_combined_map(cfg, lakes_theoretical, compare_df):
             rel_clean = rel_clean.drop(columns="index_right")
         joined = gpd.sjoin(rel_clean, states_econ[[name_col, "geometry"]],
                            how="inner", predicate="intersects")
-        agg = joined.groupby(name_col)["Covered_Heat_GWh"].sum().reset_index()
+        agg = joined.groupby(name_col)[val_col].sum().reset_index()
         agg.columns = [name_col, "Total_GWh"]
         states_econ = states_econ.merge(agg, on=name_col, how="left")
         states_econ["Total_GWh"] = states_econ["Total_GWh"].fillna(0)
@@ -141,7 +144,7 @@ def plot_combined_map(cfg, lakes_theoretical, compare_df):
             title = "Economic Potential" if lang == "en" else "Wirtschaftliches Potenzial"
             ax.set_title(title, fontweight="bold")
             bubble_color = "#f58223"
-            value_col = "Covered_Heat_GWh"
+            value_col = val_col
             data = lakes_economic
             sf = scale_factor_econ
 
