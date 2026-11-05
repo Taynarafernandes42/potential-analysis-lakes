@@ -43,8 +43,8 @@ class Config:
     target_crs = "EPSG:3035"
 
     # Physical constants
-    cp_water = 4184         # J/(kg·K)
-    density_water = 998     # kg/m³
+    cp_water = 4180         # J/(kg·K)
+    density_water = 1000     # kg/m³
 
     # --- Theoretical potential ---
     delta_T = 1.0
