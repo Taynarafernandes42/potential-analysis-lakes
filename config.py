@@ -120,6 +120,42 @@ class Config:
         "CAPEX_Water", "hours_Water", "c_el_W", "COP_Water", "wacc_central", "q_loss", "c_pipe",  
     ]
 
+    # Combined scenarios (scenario_analysis.py, run after the OAT sensitivity analysis)
+    # Scenario A is the base case. Values not listed keep the base case. The plot follows this order.
+    # Groups: "Base", "Demand side" (costs, prices, demand), "Lake side" (permissible lake cooling).
+    # WACC values are real (nominal - 2 % inflation), as in sensitivity_param_ranges.
+    # Additional keys: demand_factor (scales all heat demand), deltaT_sus (permissible lake cooling in K).
+    scenarios = {
+        "A": {"label": "Base case", "group": "Base",
+              "params": {}},
+        "B": {"label": "Equal electricity prices", "group": "Demand side",
+              "params": {"c_el_L": 0.25, "c_el_W": 0.25}},
+        "C": {"label": "Mature central system", "group": "Demand side",
+              "params": {"CAPEX_Water": 1080.0 * 0.9, "c_pipe": 2000.0, "COP_Water": 4.0}},
+        "D": {"label": "Decentral progress", "group": "Demand side",
+              "params": {"CAPEX_Air": 1901.0 * 0.9, "COP_Air": 3.75}},
+        "E": {"label": "Building renovation", "group": "Demand side",
+              "params": {"demand_factor": 0.7, "COP_Air": 3.75}},
+        "F": {"label": "Optimistic for LSWSHP", "group": "Demand side",
+              "params": {"c_el_L": 0.47, "c_el_W": 0.15, "COP_Air": 2.6, "COP_Water": 4.0,
+                         "CAPEX_Air": 2240.0, "CAPEX_Water": 520.0,
+                         "hours_Air": 2000, "hours_Water": 5000,
+                         "wacc_decentral": 0.03, "wacc_central": 0.03,
+                         "c_pipe": 2000.0, "q_loss": 0.07}},
+        "G": {"label": "Pessimistic for LSWSHP", "group": "Demand side",
+              "params": {"c_el_L": 0.25, "c_el_W": 0.25, "COP_Air": 3.75, "COP_Water": 3.0,
+                         "CAPEX_Air": 1380.0, "CAPEX_Water": 1500.0,
+                         "hours_Air": 2300, "hours_Water": 2000,
+                         "wacc_decentral": 0.01, "wacc_central": 0.09,
+                         "c_pipe": 3500.0, "q_loss": 0.20}},
+        "H": {"label": "$\\Delta T_{sus}$ = 0.5 K", "group": "Lake side",
+              "params": {"deltaT_sus": 0.5}},
+        "I": {"label": "$\\Delta T_{sus}$ = 2 K", "group": "Lake side",
+              "params": {"deltaT_sus": 2.0}},
+        "J": {"label": "$\\Delta T_{sus}$ = 3 K", "group": "Lake side",
+              "params": {"deltaT_sus": 3.0}},
+    }
+
     # --- Derived paths ---
     @property
     def theoretical_csv(self):
@@ -169,6 +205,14 @@ class Config:
     def utilized_mask_cache_path(self):
         suffix = f"_{self.nuts1_filter[0]}" if self.nuts1_filter else ""
         return str(Path(self.processed_dir) / f"utilized_mask_{self.cache_tag}{suffix}.npy")
+
+    @property
+    def scenario_csv(self):
+        return str(Path(self.processed_dir) / f"economic_scenarios_{self.cache_tag}.csv")
+
+    @property
+    def scenario_plot_path(self):
+        return str(Path(self.results_dir) / "Economic_Scenarios.pdf")
 
     @property
     def economic_sensitivity_csv(self):

@@ -102,6 +102,8 @@ def _calculate_ei_raster(cfg):
     HI = np.zeros((rows, cols), dtype="int32")
     D = np.full((rows, cols), np.nan, dtype="float32")
     HUB = np.zeros((rows, cols), dtype="int32")
+    # Trunk length hub -> lake (hub mode) or distance to shore (pixel mode); used for the distance limit
+    D_TRUNK = np.full((rows, cols), np.nan, dtype="float32")
 
     E_h_kWh = heat_data.astype("float64") * 1000.0  # MWh to kWh
     d_pixel = np.maximum(dist_to_shore_m, cfg.min_pipe_length_m)
@@ -110,6 +112,7 @@ def _calculate_ei_raster(cfg):
     if cfg.distance_mode == "pixel":
         D = d_pixel.astype("float32")
         HI = nearest_lake_id_map.astype("int32")
+        D_TRUNK = dist_to_shore_m.astype("float32")
     else:
         # Hub-based distance
         if nodata_heat is not None:
@@ -164,14 +167,19 @@ def _calculate_ei_raster(cfg):
                 D[rr, cc] = (d_ph + share * d_hub_shore).astype("float32")
                 HI[rr, cc] = lake_id_hub
                 HUB[rr, cc] = hub_counter
+                D_TRUNK[rr, cc] = d_hub_shore
 
             # Fill non-valid pixels with pixel-based distance
             D[~valid_mask] = d_pixel[~valid_mask].astype("float32")
             HI[~valid_mask] = nearest_lake_id_map[~valid_mask].astype("int32")
+            D_TRUNK[~valid_mask] = dist_to_shore_m[~valid_mask].astype("float32")
 
     # --- Apply max distance limit ---
+    # The limit applies to the trunk pipeline from the hub to the lake (hub mode) or to the
+    # distance to the shore (pixel mode), i.e. to a real distance, not to the effective
+    # distance d_i (which contains only the demand-weighted share of the trunk pipeline).
     D = np.where(
-        np.isfinite(D) & (D <= cfg.ei_max_dist_m),
+        np.isfinite(D) & np.isfinite(D_TRUNK) & (D_TRUNK <= cfg.ei_max_dist_m),
         np.maximum(D, cfg.min_pipe_length_m), np.nan
     ).astype("float32")
     mask_valid = np.isfinite(D) & (HI > 0)
@@ -215,13 +223,14 @@ def _calculate_ei_raster(cfg):
 
     # --- Save to GeoTIFF ---
     out_profile = heat_profile.copy()
-    out_profile.update({"count": 4, "dtype": "float32", "nodata": np.nan})
+    out_profile.update({"count": 5, "dtype": "float32", "nodata": np.nan})
     Path(cfg.ei_output_tif).parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(cfg.ei_output_tif, "w", **out_profile) as dst:
         dst.write(EI.astype("float32"), 1)
         dst.write(HI.astype("float32"), 2)
         dst.write(D.astype("float32"), 3)
         dst.write(HUB.astype("float32"), 4)
+        dst.write(D_TRUNK.astype("float32"), 5)
 
     print(f"  EI raster saved: {cfg.ei_output_tif}")
     return EI, HI, D, heat_data, transform, crs_raster
