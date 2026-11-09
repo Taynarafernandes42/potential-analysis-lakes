@@ -1,0 +1,2 @@
+lake_id,static_lake_heat_GWh,annual_demand_GWh,selected_year,year,useful_heat_GWh,demand_GWh,covered_GWh,coverage_pct,deficit_hours,deficit_GWh,surplus_GWh
+13463,111.85900558092338,67.79828125,2017,2017,155.7136945729798,67.79561403340465,60.3999794558818,89.09127871623255,1022,7.395634577522861,95.31371511709798
