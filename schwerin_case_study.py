@@ -145,6 +145,16 @@ def set_month_xaxis(axes):
         ax.set_xticklabels(month_labels)
 
 
+def save_case_study_plot(fig, stem):
+    """Save a case-study figure as PDF and SVG in the results folder."""
+    pdf_path = OUTPUT_DIR / f"{stem}.pdf"
+    svg_path = OUTPUT_DIR / f"{stem}.svg"
+    fig.savefig(pdf_path, format="pdf", dpi=300, bbox_inches="tight")
+    fig.savefig(svg_path, format="svg", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  > Plot saved: {stem}.pdf and {stem}.svg")
+
+
 # ============================================================
 # STEP 1: STATIC POTENTIAL
 # ============================================================
@@ -565,10 +575,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     set_month_xaxis(axes)
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"potential_vs_demand_{selected_year}.svg",
-                bbox_inches="tight")
-    plt.close(fig)
-    print(f"  > Plot saved: potential_vs_demand_{selected_year}.svg")
+    save_case_study_plot(fig, f"potential_vs_demand_{selected_year}")
 
     # --- PLOT 2: Monthly energy balance ---
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -602,10 +609,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     ax.set_title(f"Monthly Energy Balance \u2013 Lake-based Useful Heat vs. Demand ({selected_year})")
     ax.legend(loc="upper right")
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"monthly_balance_{selected_year}.svg",
-                bbox_inches="tight")
-    plt.close(fig)
-    print(f"  > Plot saved: monthly_balance_{selected_year}.svg")
+    save_case_study_plot(fig, f"monthly_balance_{selected_year}")
 
     # --- Summary statistics ---
     total_potential_GWh = potential_kW.sum() / 1e6
@@ -717,10 +721,7 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
     cbar.set_ticks([0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "heatmap_daily_coverage_all_years.svg",
-                bbox_inches="tight")
-    plt.close(fig)
-    print(f"  > Plot saved: heatmap_daily_coverage_all_years.svg")
+    save_case_study_plot(fig, "heatmap_daily_coverage_all_years")
 
     # --- Summary: days below thresholds ---
     below_50 = np.nansum(coverage_matrix_raw < 50, axis=1)
@@ -838,10 +839,7 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
         ax.axvline(ms, color="white", lw=0.3, alpha=0.5)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "heatmap_hourly_deficit_all_years.svg",
-                bbox_inches="tight")
-    plt.close(fig)
-    print(f"  > Plot saved: heatmap_hourly_deficit_all_years.svg")
+    save_case_study_plot(fig, "heatmap_hourly_deficit_all_years")
 
     # --- Summary statistics ---
     print(f"\n  {'Year':<6}{'Deficit h':<14}{'Deficit %':<12}"
@@ -1019,9 +1017,7 @@ def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
     ax.text(-0.02, 1.05, "B", transform=ax.transAxes, fontsize=22, fontweight="bold",
             va="bottom", ha="right")
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "climate_year_comparison_ASHP_LSWSHP.svg", bbox_inches="tight")
-    plt.close(fig)
-    print("  > Plot saved: climate_year_comparison_ASHP_LSWSHP.svg")
+    save_case_study_plot(fig, "climate_year_comparison_ASHP_LSWSHP")
     return df
 
 
