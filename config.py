@@ -122,23 +122,23 @@ class Config:
 
     # Combined scenarios (scenario_analysis.py, run after the OAT sensitivity analysis)
     # Scenario A is the base case. Values not listed keep the base case. The plot follows this order.
-    # Groups: "Base", "Demand side" (costs, prices, demand), "Lake side" (permissible lake cooling).
+    # Groups: "Base", "Techno-economic" (prices, costs, COP), "Lake resource" (permissible lake cooling).
     # WACC values are real (nominal - 2 % inflation), as in sensitivity_param_ranges.
     # Additional keys: demand_factor (scales all heat demand), deltaT_sus (permissible lake cooling in K).
     scenarios = {
         "A": {"label": "Base case", "group": "Base",
               "params": {}},
-        "B": {"label": "Equal electricity prices", "group": "Demand side",
+        "B": {"label": "$c_{el}$ = 0.25 €/kWh (ASHP and LSWSHP)", "group": "Techno-economic",
               "params": {"c_el_L": 0.25, "c_el_W": 0.25}},
-        "C": {"label": "Mature central system", "group": "Demand side",
+        "C": {"label": "LSWSHP: $C_{inv}$ −10 %, COP 4.0", "group": "Techno-economic",
               "params": {"CAPEX_Water": 1080.0 * 0.9, "COP_Water": 4.0}},
-        "D": {"label": "Decentral progress", "group": "Demand side",
+        "D": {"label": "ASHP: $C_{inv}$ −10 %, COP 3.75", "group": "Techno-economic",
               "params": {"CAPEX_Air": 1901.0 * 0.9, "COP_Air": 3.75}},
-        "E": {"label": "$\\Delta T_{sus}$ = 0.5 K", "group": "Lake side",
+        "E": {"label": "$\\Delta T_{sus}$ = 0.5 K", "group": "Lake resource",
               "params": {"deltaT_sus": 0.5}},
-        "F": {"label": "$\\Delta T_{sus}$ = 2 K", "group": "Lake side",
+        "F": {"label": "$\\Delta T_{sus}$ = 2 K", "group": "Lake resource",
               "params": {"deltaT_sus": 2.0}},
-        "G": {"label": "$\\Delta T_{sus}$ = 3 K", "group": "Lake side",
+        "G": {"label": "$\\Delta T_{sus}$ = 3 K", "group": "Lake resource",
               "params": {"deltaT_sus": 3.0}},
     }
 

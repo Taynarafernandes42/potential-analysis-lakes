@@ -36,7 +36,7 @@ EI_PARAMS = [
     "wacc_decentral", "wacc_central",
 ]
 
-GROUP_COLORS = {"Base": "#555555", "Demand side": "#f58220", "Lake side": "#1976d2"}
+GROUP_COLORS = {"Base": "#555555", "Techno-economic": "#f58220", "Lake resource": "#1976d2"}
 
 
 def _base_params(cfg):
@@ -163,7 +163,7 @@ def plot_scenarios(cfg, df):
     groups = list(dict.fromkeys(df["group"]))
     handles = [mpatches.Patch(color=GROUP_COLORS.get(g, "#999999"), label=g) for g in groups]
     handles += [plt.Line2D([], [], color="k", ls="--", lw=1.2, label="base case")]
-    fig.legend(handles=handles, fontsize=11, loc="lower center", bbox_to_anchor=(0.5, -0.04),
+    fig.legend(handles=handles, fontsize=11, loc="lower center", bbox_to_anchor=(0.5, -0.09),
                ncol=len(handles), frameon=False)
     plt.tight_layout(rect=(0, 0.04, 1, 1))
 
