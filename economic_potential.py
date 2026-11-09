@@ -761,11 +761,11 @@ def plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask=None, actual_
     for ax, dist_vals, label in zip(axes, dist_arrays, x_labels):
         if np.any(mask_gray):
             ax.scatter(dist_vals[mask_gray], heat_vals[mask_gray],
-                       c="lightgray", s=5, alpha=0.7, linewidths=0, label="EI < 1")
+                       c="lightgray", s=25, alpha=0.7, linewidths=0, label="EI < 1")
         if np.any(mask_color):
             sc = ax.scatter(dist_vals[mask_color], heat_vals[mask_color],
                             c=ei_vals[mask_color], cmap="plasma_r",
-                            s=5, alpha=1, linewidths=0, norm=LogNorm(vmin=1, vmax=5))
+                            s=25, alpha=1, linewidths=0, norm=LogNorm(vmin=1, vmax=5))
             cbar = fig.colorbar(sc, ax=ax, pad=0.02)
             cbar.set_label("EI (clipped at 5)")
             cbar.set_ticks([1, 2, 3, 4, 5])
@@ -781,8 +781,11 @@ def plot_scatter(cfg, ei_data, dist_data, heat_data, utilized_mask=None, actual_
         ax.set_title(label)
 
     plt.tight_layout()
-    Path(cfg.economic_scatter_plot_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(cfg.economic_scatter_plot_path.replace(".png", ".svg"), format="svg", dpi=300, bbox_inches="tight")
+    out = Path(cfg.economic_scatter_plot_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out, format="png", dpi=300, bbox_inches="tight")
+    plt.savefig(out.with_suffix(".pdf"), format="pdf", dpi=300, bbox_inches="tight")
+    plt.savefig(out.with_suffix(".svg"), format="svg", dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
