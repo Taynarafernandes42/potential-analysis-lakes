@@ -539,18 +539,27 @@ def sensitivity_analysis(cfg, ei_data, hylak_data, dist_data, heat_data):
             if np.any(mask_ei):
                 uids, inv = np.unique(HI_base[mask_ei], return_inverse=True)
                 sums = np.bincount(inv, weights=heat_MWh_base[mask_ei]).astype(float)
-                covered = sum(
-                    min(s / 1000.0, lake_to_useful(pot_map.get(int(uid), 0.0), p["COP_Water"], p["q_loss"]))
-                    for uid, s in zip(uids, sums)
+                pot_del = lake_to_useful(
+                    np.array([pot_map.get(int(uid), 0.0) for uid in uids]), p["COP_Water"], p["q_loss"]
                 )
+                covered_lake = np.minimum(sums / 1000.0, pot_del)          # GWh per lake
             else:
-                covered = 0.0
+                covered_lake = np.zeros(0)
+
+            # Minimum project size (same sizing as in apply_min_project_size / scenario_analysis,
+            # with the varied q_loss and hours_Water)
+            cap_kW = covered_lake * 1e6 * (1 + p["q_loss"]) / p["hours_Water"]
+            above = (cap_kW >= cfg.min_project_capacity_kW) & (covered_lake > 0)
 
             results.append({"parameter": param_name, "tested_value": float(val),
-                            "Utilization_GWh": covered})
+                            "Utilization_before_min_GWh": float(covered_lake.sum()),
+                            "Utilization_GWh": float(covered_lake[above].sum()),
+                            "Lakes_with_potential": int((covered_lake > 0).sum()),
+                            "Lakes_above_min": int(above.sum())})
 
     df = pd.DataFrame(results)
     df["Utilization_TWh"] = df["Utilization_GWh"] / 1000.0
+    df["Utilization_before_min_TWh"] = df["Utilization_before_min_GWh"] / 1000.0
     return df, params_base
 
 
