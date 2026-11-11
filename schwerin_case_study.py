@@ -870,6 +870,94 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
 
 
 # ============================================================
+# STEP 8b: HOURLY EXPORT FOR LAKE FEEDBACK MODELLING
+# ============================================================
+
+def export_hourly_lake_interaction(df_hourly, demand_series, common_years,
+                                   lake_area_m2):
+    """Write an hourly CSV with potentials, heat-pump source temperatures and
+    lake heat flux. Pure post-processing: reuses the columns computed in
+    STEP 2/2b/CAP and the same formulas as STEP 8 – no result is changed.
+
+    Sign convention: heat flux > 0 = heat withdrawn from the lake.
+    Heat flux is referred to the total lake surface area [W/m2].
+    """
+    print("\n" + "=" * 60)
+    print("  STEP 8b: HOURLY EXPORT FOR LAKE FEEDBACK")
+    print("=" * 60)
+
+    frames = []
+    for year in common_years:
+        pot_yr = df_hourly[df_hourly.index.year == year]
+        dem_yr = demand_series[demand_series.index.year == year]
+        if len(pot_yr) == 0 or len(dem_yr) == 0:
+            continue
+
+        # same positional alignment as STEP 5-9
+        n = min(len(pot_yr), len(dem_yr), 8760)
+        pot = pot_yr.iloc[:n]
+        dem_kW = dem_yr.values[:n]
+
+        t_in = pot["temp_C"].values
+        dT = pot["deltaT_hex"].values
+        cop = pot["COP"].values
+        ext = pot["extractable"].values
+        lake_pot_kW = pot["lake_kW"].values                # after annual dT limit
+        useful_unc_kW = pot["useful_uncapped_kW"].values
+        useful_cap_kW = pot["useful_kW"].values            # capped at installed capacity
+
+        # Actual operation (identical to STEP 8)
+        covered_kW = np.minimum(dem_kW, useful_cap_kW)
+        lake_extr_kW = np.where(
+            ext, covered_kW * (1 + cfg.q_loss) * (1 - 1 / cop), 0.0
+        )
+
+        # Water flow through the heat exchanger: Q = V * rho * cp * dT
+        with np.errstate(divide="ignore", invalid="ignore"):
+            flow_pot_m3s = np.where(dT > 0, lake_pot_kW * 1e3 / (RHO * CP * dT), 0.0)
+            flow_op_m3s = np.where(dT > 0, lake_extr_kW * 1e3 / (RHO * CP * dT), 0.0)
+
+        frames.append(pd.DataFrame({
+            "year": year,
+            "extractable": ext,
+            # temperatures at the heat pump (source side)
+            "T_lake_intake_C": t_in,
+            "deltaT_hex_K": dT,
+            "T_return_to_lake_C": t_in - dT,
+            "COP": np.where(ext, cop, np.nan),
+            # potentials
+            "lake_heat_potential_kW": lake_pot_kW,
+            "useful_heat_potential_uncapped_kW": useful_unc_kW,
+            "useful_heat_potential_capped_kW": useful_cap_kW,
+            # actual operation
+            "demand_kW": dem_kW,
+            "useful_heat_covered_kW": covered_kW,
+            "lake_heat_extracted_kW": lake_extr_kW,
+            "water_flow_potential_m3s": flow_pot_m3s,
+            "water_flow_operation_m3s": flow_op_m3s,
+            # heat flux per lake surface area
+            "heat_flux_potential_W_m2": lake_pot_kW * 1e3 / lake_area_m2,
+            "heat_flux_extracted_W_m2": lake_extr_kW * 1e3 / lake_area_m2,
+        }, index=pot.index))
+
+    df_out = pd.concat(frames)
+    df_out.index.name = "datetime"
+
+    csv_path = OUTPUT_DIR / "hourly_lake_interaction.csv"
+    df_out.to_csv(csv_path, float_format="%.6g")
+
+    # Consistency check against STEP 8 (Lake_Heat_Extracted_GWh)
+    yearly = df_out.groupby("year")["lake_heat_extracted_kW"].sum() / 1e6
+    print(f"  Lake area used for flux: {lake_area_m2/1e6:.2f} km2")
+    print(f"  Mean lake heat extracted: {yearly.mean():.3f} GWh/yr (should match STEP 8)")
+    print(f"  Mean heat flux (operation): "
+          f"{df_out['heat_flux_extracted_W_m2'].mean():.3f} W/m2, "
+          f"max {df_out['heat_flux_extracted_W_m2'].max():.3f} W/m2")
+    print(f"  > Hourly table saved: {csv_path} ({len(df_out)} rows)")
+    return df_out
+
+
+# ============================================================
 # STEP 9: CLIMATE-YEAR COMPARISON LSWSHP vs. ASHP (appendix)
 # ============================================================
 
@@ -1296,6 +1384,13 @@ def main():
     csv_path = OUTPUT_DIR / "annual_potential_demand_utilization.csv"
     df_annual_table.to_csv(csv_path, index=False)
     print(f"  > Table saved: {csv_path}")
+
+    # =========================================================
+    # STEP 8b: Hourly export for lake feedback modelling
+    # =========================================================
+    export_hourly_lake_interaction(
+        df_hourly, demand_series, common_years, lake_area_km2 * 1e6
+    )
 
     # =========================================================
     # STEP 9: Climate-year comparison LSWSHP vs. ASHP (appendix)
