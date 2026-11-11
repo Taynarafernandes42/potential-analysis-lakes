@@ -692,8 +692,15 @@ def plot_project_size_distribution(cfg, compare_df):
     thr_MW = cfg.min_project_capacity_kW / 1000.0
     lang = cfg.plot_language
 
-    plt.rcParams.update({"font.size": 14, "font.family": "serif", "mathtext.fontset": "cm"})
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # Local font settings (plot_sensitivity changes the global rcParams before this plot)
+    rc = {"font.size": 9, "axes.labelsize": 10, "xtick.labelsize": 9, "ytick.labelsize": 9,
+          "legend.fontsize": 8, "font.family": "serif", "mathtext.fontset": "cm"}
+    with plt.rc_context(rc):
+        _plot_project_size_distribution(cfg, df, cap_MW, limited_by, thr_MW, lang)
+
+
+def _plot_project_size_distribution(cfg, df, cap_MW, limited_by, thr_MW, lang):
+    fig, ax = plt.subplots(figsize=(7, 4))
 
     bins = np.logspace(np.log10(max(cap_MW.min(), 1e-4)), np.log10(cap_MW.max()), 40)
     groups = [("lake", "#1976d2"), ("demand", "#f58220")]
@@ -713,7 +720,7 @@ def plot_project_size_distribution(cfg, compare_df):
     if lang != "en":
         thr_label = (f"Mindestgröße {cfg.min_project_capacity_kW:.0f} kW: "
                      f"{n_after} Seen, {pot_share:.0f}% des Potenzials")
-    ax.axvline(thr_MW, color="k", ls="--", lw=1.8, label=thr_label)
+    ax.axvline(thr_MW, color="k", ls="--", lw=1.2, label=thr_label)
 
     ax.set_xscale("log")
     xlabel = (f"Heat-pump capacity per lake [MW]  (FLH = {cfg.hours_Water} h)" if lang == "en"
@@ -721,7 +728,7 @@ def plot_project_size_distribution(cfg, compare_df):
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Number of lakes" if lang == "en" else "Anzahl Seen")
     ax.grid(alpha=0.3, which="both")
-    ax.legend(fontsize=11, loc="upper right")
+    ax.legend(loc="upper right")
     plt.tight_layout()
 
     out = Path(cfg.project_size_plot_path)
