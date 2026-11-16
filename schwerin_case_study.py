@@ -20,7 +20,7 @@ import warnings
 import holidays as hol
 from demandlib import bdew
 
-from config import Config, lake_to_useful
+from config import Config, lake_to_useful, useful_to_lake
 from lake_io import read_lakes
 
 warnings.filterwarnings("ignore")
@@ -31,7 +31,17 @@ warnings.filterwarnings("ignore")
 
 cfg = Config()
 
-LAKE_ID = 13463
+# Lakes: one or more HydroLAKES IDs. Several lakes are treated as ONE combined
+# lake: volumes, areas and economic heat (Heat_EI_ge1_MWh) are summed, and the
+# single temperature series LAKE_TEMP_CSV is applied to the combined lake.
+LAKE_IDS = [13463, 13454]            # e.g. [13463, <second Hylak_id>]
+LAKE_NAME = "Lake Schwerin"   # used in titles and console output
+
+# Optional hard-coded volume [Mio m3] per lake ID (None / not listed = HydroLAKES Vol_total)
+LAKE_VOLUME_OVERRIDE_MCM = {
+    13463: 356,
+    13454: 331,
+}
 OUTPUT_DIR = Path(cfg.results_dir) / "CaseStudy_Schwerin"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -135,6 +145,69 @@ def calc_cop(lake_temp_C: np.ndarray, delta_t_hex: np.ndarray) -> np.ndarray:
     return LORENZ_EFF * t_h / (t_h - t_c)
 
 
+def _align_year(df_hourly, demand_series, year):
+    """Lake data and demand of one year, aligned by timestamp (all hours,
+    8784 h in leap years). Replaces the former positional cut at 8760 h,
+    which dropped 31 Dec in leap years."""
+    pot = df_hourly[df_hourly.index.year == year]
+    dem = demand_series[demand_series.index.year == year]
+    idx = pot.index.intersection(dem.index)
+    if not (len(idx) == len(pot) == len(dem)):
+        raise ValueError(
+            f"{year}: index mismatch (lake {len(pot)} h, demand {len(dem)} h, "
+            f"common {len(idx)} h) - check time zone / time stamps"
+        )
+    return pot.loc[idx], dem.loc[idx].values
+
+
+MAX_GAP_FILL_H = 48  # max. length of a data gap that is filled [h]
+
+
+def load_hourly_complete_years(csv_path, label, max_gap_h=MAX_GAP_FILL_H):
+    """Read an hourly CSV, reindex to a gap-free hourly time axis and fill
+    short gaps (time interpolation, at series ends: nearest value).
+    A year is complete only if it has all hours (8784 in leap years)
+    and no gap longer than max_gap_h remains."""
+    df = pd.read_csv(csv_path, parse_dates=["datetime"], index_col="datetime")
+    df = df[~df.index.duplicated(keep="first")].sort_index()
+
+    full_idx = pd.date_range(f"{df.index.year.min()}-01-01 00:00",
+                             f"{df.index.year.max()}-12-31 23:00",
+                             freq="h", tz=df.index.tz)
+    df = df.reindex(full_idx)
+    df.index.name = "datetime"
+    missing = df.isna().any(axis=1)
+
+    # length of each gap (consecutive missing hours); only short gaps are filled
+    run_id = (missing != missing.shift()).cumsum()
+    gap_len = missing.groupby(run_id).transform("sum")
+    fillable = missing & (gap_len <= max_gap_h)
+
+    filled_df = df.interpolate(method="time", limit_area="inside").ffill().bfill()
+    df = df.where(~fillable, filled_df)
+    still_missing = df.isna().any(axis=1)
+
+    miss_per_year = missing.groupby(df.index.year).sum()
+    left_per_year = still_missing.groupby(df.index.year).sum()
+    complete_years = sorted(left_per_year[left_per_year == 0].index.tolist())
+
+    filled = miss_per_year[(miss_per_year > 0) & (left_per_year == 0)]
+    dropped = left_per_year[left_per_year > 0]
+    for y, n in filled.items():
+        print(f"  {label}: {y} - {int(n)} missing h filled")
+    for y, n in dropped.items():
+        print(f"  {label}: {y} excluded ({int(n)} h missing, gap > {max_gap_h} h)")
+
+    df = df[df.index.year.isin(complete_years)]
+    return df, complete_years
+
+
+def _drop_feb29(index, values):
+    """Remove 29 Feb for plots with a fixed 365-day / 8760-h axis."""
+    keep = ~((index.month == 2) & (index.day == 29))
+    return values[keep]
+
+
 def set_month_xaxis(axes):
     """Set x-axis ticks to month boundaries for hourly data."""
     month_starts = [0, 744, 1416, 2160, 2880, 3624, 4344, 5088, 5832, 6552, 7296, 8016]
@@ -159,14 +232,14 @@ def save_case_study_plot(fig, stem):
 # STEP 1: STATIC POTENTIAL
 # ============================================================
 
-def compute_static_potential(lake_vol_km3):
+def compute_static_potential(lake_vol_mcm):
     """Compute volume-based static thermal potential."""
     print("\n" + "=" * 60)
     print("  STEP 1: STATIC POTENTIAL (volume-based)")
     print("=" * 60)
 
     seconds_per_year = 365 * 24 * 3600
-    vol_m3 = lake_vol_km3 * 1e6
+    vol_m3 = lake_vol_mcm * 1e6
 
     flow_rate_m3s = vol_m3 / seconds_per_year
     withdrawal_m3s = flow_rate_m3s * (DELTA_T_TECH / DELTA_T_HEX_MAX)
@@ -179,7 +252,7 @@ def compute_static_potential(lake_vol_km3):
 
     max_annual_GWh = vol_m3 * RHO * CP * DELTA_T_TECH / 3.6e12
 
-    print(f"  Lake volume:        {lake_vol_km3:.4f} km3 ({vol_m3/1e6:.2f} Mio m3)")
+    print(f"  Lake volume:        {lake_vol_mcm:.2f} Mio m3 ({vol_m3/1e9:.4f} km3)")
     print(f"  Flow rate:          {flow_rate_m3s:.4f} m3/s")
     print(f"  Withdrawal flow:    {withdrawal_m3s:.4f} m3/s")
     print(f"  Thermal capacity:   {capacity_W/1e6:.2f} MW")
@@ -203,14 +276,14 @@ def compute_static_potential(lake_vol_km3):
 # STEP 2: HOURLY TEMPERATURE-DEPENDENT POTENTIAL
 # ============================================================
 
-def compute_hourly_potential(lake_vol_km3, df_lake, complete_years):
+def compute_hourly_potential(lake_vol_mcm, df_lake, complete_years):
     """Compute hourly thermal potential constrained by lake temperature."""
     print("\n" + "=" * 60)
     print("  STEP 2: HOURLY TEMPERATURE-DEPENDENT POTENTIAL")
     print("=" * 60)
 
     seconds_per_year = 365.25 * 24 * 3600
-    vol_m3 = lake_vol_km3 * 1e6
+    vol_m3 = lake_vol_mcm * 1e6
     flow_m3s = vol_m3 / seconds_per_year * (DELTA_T_TECH / DELTA_T_HEX_MAX)
     max_annual_kWh = vol_m3 * RHO * CP * DELTA_T_TECH / 3.6e6
 
@@ -243,6 +316,8 @@ def compute_hourly_potential(lake_vol_km3, df_lake, complete_years):
 
         yr_data = df.loc[mask_yr]
         extractable_mask = yr_data["extractable"]
+        n_hours_yr = len(yr_data)
+        n_extractable = int(extractable_mask.sum())
 
         annual_results.append({
             "year": year,
@@ -250,9 +325,9 @@ def compute_hourly_potential(lake_vol_km3, df_lake, complete_years):
             "constrained_potential_GWh": actual_kWh / 1e6,
             "scale_factor": scale,
             "limited": raw_kWh > max_annual_kWh,
-            "hours_extractable": int(extractable_mask.sum()),
-            "hours_outage": 8760 - int(extractable_mask.sum()),
-            "outage_pct": (8760 - int(extractable_mask.sum())) / 8760 * 100,
+            "hours_extractable": n_extractable,
+            "hours_outage": n_hours_yr - n_extractable,
+            "outage_pct": (n_hours_yr - n_extractable) / n_hours_yr * 100,
             "mean_temp_C": yr_data["temp_C"].mean(),
             "min_temp_C": yr_data["temp_C"].min(),
             "max_temp_C": yr_data["temp_C"].max(),
@@ -422,18 +497,12 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     print(f"  STEP 5: COMBINED PLOT - Year {selected_year}")
     print("=" * 60)
 
-    # Extract data for selected year
-    pot_yr = df_hourly[df_hourly.index.year == selected_year].copy()
-    dem_yr = demand_series[demand_series.index.year == selected_year].copy()
+    # Extract data for selected year (aligned by timestamp, full year)
+    pot_yr, demand_kW = _align_year(df_hourly, demand_series, selected_year)
+    pot_yr = pot_yr.copy()
 
     if len(pot_yr) == 0:
-        raise ValueError(f"No potential data for year {selected_year}")
-    if len(dem_yr) == 0:
-        raise ValueError(f"No demand data for year {selected_year}")
-
-    # Align to same length (8760 hours)
-    pot_yr = pot_yr.iloc[:8760]
-    dem_yr = dem_yr.iloc[:8760]
+        raise ValueError(f"No data for year {selected_year}")
 
     # Get annual stats
     yr_stats = df_annual[df_annual["year"] == selected_year].iloc[0]
@@ -443,7 +512,6 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     # Convert potential to kW for comparison
     potential_kW = pot_yr["useful_kW"].values
-    demand_kW = dem_yr.values
 
     # --- Distinct color palette ---
     COLOR_LAKE_TEMP = "#1f4e79"       # dark navy blue
@@ -500,7 +568,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 
     ax.set_title(
-        f"Lake Schwerin \u2013 Thermal Potential vs. Heating Demand ({selected_year})",
+        f"{LAKE_NAME} \u2013 Thermal Potential vs. Heating Demand ({selected_year})",
         fontweight="bold",
     )
 
@@ -626,7 +694,7 @@ def plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
     print(f"  Total demand:        {total_demand_GWh:.2f} GWh")
     print(f"  Covered demand:      {covered_GWh:.2f} GWh")
     print(f"  Overall coverage:    {coverage_overall:.1f}% (hourly)")
-    print(f"  Hours with deficit:  {deficit_hours} h ({deficit_hours/87.6:.1f}%)")
+    print(f"  Hours with deficit:  {deficit_hours} h ({deficit_hours/len(pot_yr)*100:.1f}%)")
     print(f"  Total deficit:       {total_deficit_kWh/1e6:.2f} GWh")
     print(f"  Total surplus:       {total_surplus_kWh/1e6:.2f} GWh")
     print(f"  Peak demand:         {demand_kW.max()/1000:.2f} MW")
@@ -655,22 +723,17 @@ def plot_daily_coverage_heatmap(df_hourly, demand_series, common_years):
     print("  STEP 6: HEATMAP - Daily Energy Coverage (all years)")
     print("=" * 60)
 
-    n_days = 365
+    n_days = 366  # leap years incl. 31 Dec; day 366 = NaN in common years
     coverage_matrix_raw = np.full((len(common_years), n_days), np.nan)
 
     for i, year in enumerate(common_years):
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
+        pot_yr, dem_kW = _align_year(df_hourly, demand_series, year)
+        if len(pot_yr) == 0:
             continue
+        pot_kW = pot_yr["useful_kW"].values
 
-        n = min(len(pot_yr), len(dem_yr), 8760)
-        pot_kW = pot_yr["useful_kW"].values[:n]
-        dem_kW = dem_yr.values[:n]
-
-        # Day of year (0-indexed, capped at 365 days)
-        doy = pot_yr.index[:n].dayofyear - 1  # 0-based
+        # Day of year (0-indexed)
+        doy = pot_yr.index.dayofyear - 1  # 0-based
 
         for d in range(n_days):
             mask_d = doy == d
@@ -758,30 +821,23 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
     print("  STEP 7: HEATMAP - Hourly Deficit (green -> red)")
     print("=" * 60)
 
-    n_hours = 8760
-    deficit_matrix = np.zeros((len(common_years), n_hours))
+    n_hours = 8760  # plot axis; 29 Feb removed from leap years for display only
+    deficit_matrix = np.full((len(common_years), n_hours), np.nan)
+    deficit_full = {}  # full-year deficit per year (incl. 29 Feb) for statistics
 
     for i, year in enumerate(common_years):
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
-            deficit_matrix[i, :] = np.nan
+        pot_yr, dem_kW = _align_year(df_hourly, demand_series, year)
+        if len(pot_yr) == 0:
             continue
-
-        n = min(len(pot_yr), len(dem_yr), n_hours)
-        pot_kW = pot_yr["useful_kW"].values[:n]
-        dem_kW = dem_yr.values[:n]
+        pot_kW = pot_yr["useful_kW"].values
 
         # Deficit: demand that cannot be met by lake potential
         deficit = np.maximum(0, dem_kW - pot_kW)
+        deficit_full[year] = deficit
 
-        # Pad if shorter than 8760
-        if n < n_hours:
-            deficit = np.pad(deficit, (0, n_hours - n),
-                             mode="constant", constant_values=np.nan)
-
-        deficit_matrix[i, :] = deficit
+        deficit_plot = _drop_feb29(pot_yr.index, deficit)
+        m = min(len(deficit_plot), n_hours)
+        deficit_matrix[i, :m] = deficit_plot[:m]
 
     # Convert to MW for readability
     deficit_matrix_MW = deficit_matrix / 1000.0
@@ -846,23 +902,19 @@ def plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years):
           f"{'Max Deficit':<14}{'Total Deficit':<14}")
     print(f"  {'':6}{'':14}{'':12}{'[MW]':<14}{'[GWh]':<14}")
     print(f"  {'-' * 60}")
-    for i, year in enumerate(common_years):
-        row = deficit_matrix[i, :]
-        valid = ~np.isnan(row)
-        deficit_hours = int(np.sum(row[valid] > 0))
-        deficit_pct = deficit_hours / np.sum(valid) * 100 if np.sum(valid) > 0 else 0
-        max_deficit_MW = np.nanmax(row) / 1000
-        total_deficit_GWh = np.nansum(row) / 1e6
+    for year in common_years:
+        if year not in deficit_full:
+            continue
+        row = deficit_full[year]
+        deficit_hours = int(np.sum(row > 0))
+        deficit_pct = deficit_hours / len(row) * 100
+        max_deficit_MW = np.max(row) / 1000
+        total_deficit_GWh = np.sum(row) / 1e6
         print(f"  {year:<6}{deficit_hours:<14}{deficit_pct:<12.1f}"
               f"{max_deficit_MW:<14.2f}{total_deficit_GWh:<14.3f}")
 
-    mean_deficit_hours = np.mean([
-        np.sum(deficit_matrix[i, ~np.isnan(deficit_matrix[i, :])] > 0)
-        for i in range(len(common_years))
-    ])
-    mean_deficit_GWh = np.nanmean([
-        np.nansum(deficit_matrix[i, :]) for i in range(len(common_years))
-    ]) / 1e6
+    mean_deficit_hours = np.mean([np.sum(r > 0) for r in deficit_full.values()])
+    mean_deficit_GWh = np.mean([np.sum(r) for r in deficit_full.values()]) / 1e6
     print(f"\n  Mean deficit hours:  {mean_deficit_hours:.0f} h/yr")
     print(f"  Mean total deficit:  {mean_deficit_GWh:.3f} GWh/yr")
 
@@ -888,15 +940,10 @@ def export_hourly_lake_interaction(df_hourly, demand_series, common_years,
 
     frames = []
     for year in common_years:
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
+        # same timestamp alignment as STEP 5-9 (full year incl. 29 Feb / 31 Dec)
+        pot, dem_kW = _align_year(df_hourly, demand_series, year)
+        if len(pot) == 0:
             continue
-
-        # same positional alignment as STEP 5-9
-        n = min(len(pot_yr), len(dem_yr), 8760)
-        pot = pot_yr.iloc[:n]
-        dem_kW = dem_yr.values[:n]
 
         t_in = pot["temp_C"].values
         dT = pot["deltaT_hex"].values
@@ -909,7 +956,7 @@ def export_hourly_lake_interaction(df_hourly, demand_series, common_years,
         # Actual operation (identical to STEP 8)
         covered_kW = np.minimum(dem_kW, useful_cap_kW)
         lake_extr_kW = np.where(
-            ext, covered_kW * (1 + cfg.q_loss) * (1 - 1 / cop), 0.0
+            ext, useful_to_lake(covered_kW, cop, cfg.q_loss), 0.0
         )
 
         # Water flow through the heat exchanger: Q = V * rho * cp * dT
@@ -976,7 +1023,7 @@ def calc_cop_ashp(t_air_C, t_sink_C):
 
 def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
                             df_air, common_years, Installed_Capacity_kW):
-    """Compare LSWSHP and ASHP for each simulated year at Lake Schwerin.
+    """Compare LSWSHP and ASHP for each simulated year at the case-study lake(s).
 
     Does NOT change any potential. It puts the constant COPs of the base case
     (COP_Air, COP_Water) into the context of climate variability.
@@ -1002,16 +1049,13 @@ def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
 
     rows = []
     for year in common_years:
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
+        pot_yr, dem = _align_year(df_hourly, demand_series, year)  # dem: consumer side [kW]
+        if len(pot_yr) == 0:
             continue
-        n = min(len(pot_yr), len(dem_yr), 8760)
-        idx = dem_yr.index[:n]
-        dem = dem_yr.values[:n]                               # consumer side [kW]
-        dlv = pot_yr["useful_kW"].values[:n]                   # deliverable [kW]
-        cop_w = pot_yr["COP"].values[:n]
-        ext = pot_yr["extractable"].values[:n]
+        idx = pot_yr.index
+        dlv = pot_yr["useful_kW"].values                       # deliverable [kW]
+        cop_w = pot_yr["COP"].values
+        ext = pot_yr["extractable"].values
 
         # --- LSWSHP + electric backup ---
         covered = np.minimum(dem, dlv)
@@ -1116,38 +1160,42 @@ def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
 def main():
     print("=" * 60)
     print("  COMBINED ANALYSIS: THERMAL POTENTIAL vs. HEATING DEMAND")
-    print("  Lake Schwerin (Hylak_id=13463)")
+    print(f"  {LAKE_NAME} (Hylak_id={', '.join(str(i) for i in LAKE_IDS)})")
     print("=" * 60)
 
-    # --- Load lake geometry ---
+    # --- Load lake geometry (one or several lakes -> combined lake) ---
     lakes_gdf = read_lakes(cfg, cfg.target_crs)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
-    lake_row = lakes_gdf[lakes_gdf["Hylak_id"] == LAKE_ID]
-    if lake_row.empty:
-        raise ValueError(f"Lake {LAKE_ID} not found!")
 
-    lake_vol_km3 = float(lake_row.iloc[0]["Vol_total"])
-    lake_area_km2 = lake_row.iloc[0].geometry.area / 1e6
-    print(f"\n  Lake ID: {LAKE_ID}")
+    lake_vol_mcm = 0.0
+    lake_area_km2 = 0.0
+    print()
+    for lid in LAKE_IDS:
+        lake_row = lakes_gdf[lakes_gdf["Hylak_id"] == lid]
+        if lake_row.empty:
+            raise ValueError(f"Lake {lid} not found!")
+        vol_hl = float(lake_row.iloc[0]["Vol_total"])        # HydroLAKES: million m3
+        vol_override = LAKE_VOLUME_OVERRIDE_MCM.get(lid)
+        vol = float(vol_override) if vol_override is not None else vol_hl
+        area = lake_row.iloc[0].geometry.area / 1e6
+        src = "hard-coded" if vol_override is not None else "HydroLAKES"
+        print(f"  Lake ID {lid}: area {area:.2f} km2, volume {vol:.2f} Mio m3 ({src}"
+              + (f", HydroLAKES: {vol_hl:.2f}" if vol_override is not None else "") + ")")
+        lake_vol_mcm += vol
+        lake_area_km2 += area
+
+    if len(LAKE_IDS) > 1:
+        print(f"  Combined ({len(LAKE_IDS)} lakes):")
     print(f"  Area: {lake_area_km2:.2f} km2")
-    print(f"  Volume: {lake_vol_km3:.4f} km3")
+    print(f"  Volume: {lake_vol_mcm:.2f} Mio m3 ({lake_vol_mcm/1e3:.4f} km3)")
 
     # --- Load lake temperature data ---
-    df_lake = pd.read_csv(LAKE_TEMP_CSV, parse_dates=["datetime"], index_col="datetime")
-    hours_per_year_lake = df_lake.groupby(df_lake.index.year).size()
-    complete_years_lake = sorted(
-        hours_per_year_lake[hours_per_year_lake >= 8760].index.tolist()
-    )
-    df_lake = df_lake[df_lake.index.year.isin(complete_years_lake)]
-    print(f"\n  Lake temp data: {complete_years_lake[0]}-{complete_years_lake[-1]}")
+    print()
+    df_lake, complete_years_lake = load_hourly_complete_years(LAKE_TEMP_CSV, "Lake temp")
+    print(f"  Lake temp data: {complete_years_lake[0]}-{complete_years_lake[-1]}")
 
     # --- Load air temperature data ---
-    df_air = pd.read_csv(AIR_TEMP_CSV, parse_dates=["datetime"], index_col="datetime")
-    hours_per_year_air = df_air.groupby(df_air.index.year).size()
-    complete_years_air = sorted(
-        hours_per_year_air[hours_per_year_air >= 8760].index.tolist()
-    )
-    df_air = df_air[df_air.index.year.isin(complete_years_air)]
+    df_air, complete_years_air = load_hourly_complete_years(AIR_TEMP_CSV, "Air temp")
     print(f"  Air temp data:  {complete_years_air[0]}-{complete_years_air[-1]}")
 
     # Common complete years
@@ -1157,13 +1205,13 @@ def main():
     # =========================================================
     # STEP 1: Static potential
     # =========================================================
-    static = compute_static_potential(lake_vol_km3)
+    static = compute_static_potential(lake_vol_mcm)
 
     # =========================================================
     # STEP 2: Hourly dynamic potential
     # =========================================================
     df_hourly, df_annual, max_annual_kWh = compute_hourly_potential(
-        lake_vol_km3, df_lake, complete_years_lake
+        lake_vol_mcm, df_lake, complete_years_lake
     )
 
     # =========================================================
@@ -1185,7 +1233,7 @@ def main():
     print("  STEP 2b: USEFUL-HEAT CONVERSION")
     print("=" * 60)
     print(f"  Mean hourly COP (extractable hours): {mean_cop_extractable:.3f}")
-    print(f"  Mean annual lake heat extracted:    {mean_lake_heat_GWh_yr:.3f} GWh/yr")
+    print(f"  Mean annual lake heat potential:    {mean_lake_heat_GWh_yr:.3f} GWh/yr")
     print(f"  Mean annual useful heat (uncapped):  {mean_useful_heat_GWh_yr:.3f} GWh/yr")
 
     # =========================================================
@@ -1199,12 +1247,17 @@ def main():
     economic_csv_path = Path("Data/Processed/economic_potential_comparison.csv")
     df_economic = pd.read_csv(economic_csv_path)
     df_economic["Hylak_id"] = df_economic["Hylak_id"].astype(int)
-    lake_economic_row = df_economic[df_economic["Hylak_id"] == LAKE_ID]
-
-    if lake_economic_row.empty:
-        raise ValueError(f"Lake {LAKE_ID} not found in {economic_csv_path}")
-
-    heat_ei_MWh = float(lake_economic_row.iloc[0]["Heat_EI_ge1_MWh"])
+    heat_ei_MWh = 0.0
+    for lid in LAKE_IDS:
+        lake_economic_row = df_economic[df_economic["Hylak_id"] == lid]
+        if lake_economic_row.empty:
+            print(f"  WARNING: Lake {lid} not in {economic_csv_path} -> 0 MWh economic heat")
+            continue
+        heat_lid = float(lake_economic_row.iloc[0]["Heat_EI_ge1_MWh"])
+        print(f"  Lake ID {lid}: Heat_EI_ge1 = {heat_lid/1e3:.3f} GWh")
+        heat_ei_MWh += heat_lid
+    if heat_ei_MWh <= 0:
+        raise ValueError(f"No economic heat for lakes {LAKE_IDS} in {economic_csv_path}")
     ANNUAL_DEMAND_TOTAL_KWH = heat_ei_MWh * 1e3  # MWh → kWh
 
     Installed_Capacity = ANNUAL_DEMAND_TOTAL_KWH / cfg.hours_Water
@@ -1283,19 +1336,15 @@ def main():
 
     annual_table_rows = []
     for i, year in enumerate(common_years):
-        pot_yr = df_hourly[df_hourly.index.year == year]
-        dem_yr = demand_series[demand_series.index.year == year]
-
-        if len(pot_yr) == 0 or len(dem_yr) == 0:
+        pot_yr, dem_kW = _align_year(df_hourly, demand_series, year)
+        if len(pot_yr) == 0:
             continue
 
-        n = min(len(pot_yr), len(dem_yr), 8760)
-        pot_kW = pot_yr["useful_kW"].values[:n]
-        unc_kW = pot_yr["useful_uncapped_kW"].values[:n]
-        dem_kW = dem_yr.values[:n]
+        pot_kW = pot_yr["useful_kW"].values
+        unc_kW = pot_yr["useful_uncapped_kW"].values
 
-        cop = pot_yr["COP"].values[:n]
-        extractable = pot_yr["extractable"].values[:n]
+        cop = pot_yr["COP"].values
+        extractable = pot_yr["extractable"].values
 
         total_potential_GWh = pot_kW.sum() / 1e6
         total_demand_GWh = dem_kW.sum() / 1e6
@@ -1314,7 +1363,7 @@ def main():
         # Source side: lake heat actually extracted to supply the covered demand
         covered_kW = np.minimum(dem_kW, pot_kW)
         lake_extracted_kW = np.where(
-            extractable, covered_kW * (1 + cfg.q_loss) * (1 - 1 / cop), 0.0
+            extractable, useful_to_lake(covered_kW, cop, cfg.q_loss), 0.0
         )
         lake_extracted_GWh = lake_extracted_kW.sum() / 1e6
 
@@ -1402,7 +1451,9 @@ def main():
     # Save combined results
     # =========================================================
     combined_summary = {
-        "lake_id": LAKE_ID,
+        "lake_ids": ";".join(str(i) for i in LAKE_IDS),
+        "lake_volume_mcm": lake_vol_mcm,
+        "lake_area_km2": lake_area_km2,
         "static_lake_heat_GWh": static["potential_GWh"],
         "annual_demand_GWh": ANNUAL_DEMAND_TOTAL_KWH / 1e6,
         "selected_year": selected_year,
