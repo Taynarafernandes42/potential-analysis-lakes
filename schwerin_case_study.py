@@ -58,13 +58,21 @@ AIR_TEMP_CSV = Path("Data/Raw/schwerin_airtemp_1994_2020.csv")
 # Every combination is computed; results go to
 #   OUTPUT_BASE_DIR / "<temp_key>_Tmin<T>C"
 # ------------------------------------------------------------
-LAKE_TEMP_SCENARIOS = {
-    # analysis without heat-pump feedback to the lake
-    "no_hp_feedback": Path("Data/Raw/schwerin_temperature_13.5m_hourly.csv"),
-    # analysis with heat-pump feedback to the lake
-    "hp_feedback": Path("Data/Raw/schwerin_temperature_13.5m_hourly_heat_pump.csv"),
-}
 T_MIN_SCENARIOS = [2.0, 3.0]  # minimum lake temperature for extraction [°C]
+LAKE_DEPTH_LABEL = "16.5 m"   # intake depth (plot titles only)
+
+# Lake temperature file per series and T_min [°C].
+# The HP-feedback run was coupled with the same T_min as the analysis.
+_T_REF_CSV = Path("Data/Raw/schwerin_temperature_16.5m_hourly.csv")
+LAKE_TEMP_SCENARIOS = {
+    # analysis without heat-pump feedback to the lake (same file for all T_min)
+    "no_hp_feedback": {t: _T_REF_CSV for t in T_MIN_SCENARIOS},
+    # analysis with heat-pump feedback to the lake (coupled run per T_min)
+    "hp_feedback": {
+        t: Path(f"Data/Raw/schwerin_temperature_16.5m_hourly_heat_pump_coupled_Tmin{t:g}C.csv")
+        for t in T_MIN_SCENARIOS
+    },
+}
 
 # Physical / technical parameters
 RHO = cfg.density_water
@@ -1230,9 +1238,10 @@ def load_economic_demand_kWh():
 # ============================================================
 
 def compare_lake_temperatures(selected_year=None):
-    """Compare the lake temperature series without / with heat-pump feedback.
+    """Compare the lake temperature without heat-pump feedback (reference)
+    with the coupled HP-feedback runs (one per T_min).
 
-    Difference convention: dT = T_hp_feedback - T_no_hp_feedback
+    Difference convention: dT = T_hp_feedback(T_min) - T_no_hp_feedback
     (negative = lake cooled by heat extraction).
     Output in OUTPUT_BASE_DIR: plot, annual and monthly CSV tables.
     """
@@ -1240,78 +1249,78 @@ def compare_lake_temperatures(selected_year=None):
     print("  STEP 0: LAKE TEMPERATURE COMPARISON (no feedback vs. HP feedback)")
     print("=" * 60)
 
-    key_ref, key_hp = "no_hp_feedback", "hp_feedback"
-    df_ref, yrs_ref = load_hourly_complete_years(LAKE_TEMP_SCENARIOS[key_ref], key_ref)
-    df_hp, yrs_hp = load_hourly_complete_years(LAKE_TEMP_SCENARIOS[key_hp], key_hp)
-    years = sorted(set(yrs_ref) & set(yrs_hp))
+    ref_csv = LAKE_TEMP_SCENARIOS["no_hp_feedback"][T_MIN_SCENARIOS[0]]
+    df_ref, yrs = load_hourly_complete_years(ref_csv, "ref (no feedback)")
+    series = {"ref": df_ref["temp_C"]}
+    years = set(yrs)
+    for t in T_MIN_SCENARIOS:
+        d, y = load_hourly_complete_years(
+            LAKE_TEMP_SCENARIOS["hp_feedback"][t], f"HP feedback Tmin{t:g}C")
+        series[t] = d["temp_C"]
+        years &= set(y)
+    years = sorted(years)
     if not years:
-        raise ValueError("No common complete years in the two lake temperature series")
+        raise ValueError("No common complete years in the lake temperature series")
 
-    idx = df_ref.index.intersection(df_hp.index)
-    df = pd.DataFrame({
-        "T_ref_C": df_ref.loc[idx, "temp_C"],
-        "T_hp_C": df_hp.loc[idx, "temp_C"],
-    })
+    df = pd.concat(series, axis=1, join="inner")
     df = df[df.index.year.isin(years)]
-    df["dT_K"] = df["T_hp_C"] - df["T_ref_C"]
     df["year"] = df.index.year
     df["month"] = df.index.month
+    for t in T_MIN_SCENARIOS:
+        df["dT_%g" % t] = df[t] - df["ref"]
 
     # --- Overall statistics ---
-    corr = df["T_ref_C"].corr(df["T_hp_C"])
-    rmse = float(np.sqrt((df["dT_K"] ** 2).mean()))
     print(f"  Common years: {years[0]}-{years[-1]} ({len(years)} yrs, {len(df)} h)")
-    print(f"  Mean dT (HP - ref):  {df['dT_K'].mean():+.3f} K")
-    print(f"  Min / max dT:        {df['dT_K'].min():+.3f} / {df['dT_K'].max():+.3f} K")
-    print(f"  RMSE:                {rmse:.3f} K")
-    print(f"  Correlation (r):     {corr:.4f}")
+    print(f"\n  {'HP run':<12}{'mean dT':<10}{'min dT':<10}{'max dT':<10}{'RMSE':<8}{'r':<8}")
+    print(f"  {'':12}{'[K]':<10}{'[K]':<10}{'[K]':<10}{'[K]':<8}")
+    print(f"  {'-' * 56}")
+    for t in T_MIN_SCENARIOS:
+        dT = df["dT_%g" % t]
+        print(f"  {f'Tmin {t:g} °C':<12}{dT.mean():<+10.3f}{dT.min():<+10.3f}"
+              f"{dT.max():<+10.3f}{np.sqrt((dT ** 2).mean()):<8.3f}"
+              f"{df['ref'].corr(df[t]):<8.4f}")
 
     # --- Annual table ---
     rows = []
     for y, g in df.groupby("year"):
-        row = {
-            "Year": y,
-            "Mean_T_ref_C": g["T_ref_C"].mean(),
-            "Mean_T_hp_C": g["T_hp_C"].mean(),
-            "Mean_dT_K": g["dT_K"].mean(),
-            "Min_dT_K": g["dT_K"].min(),
-            "Max_dT_K": g["dT_K"].max(),
-            "Min_T_ref_C": g["T_ref_C"].min(),
-            "Min_T_hp_C": g["T_hp_C"].min(),
-        }
+        row = {"Year": y,
+               "Mean_T_ref_C": g["ref"].mean(),
+               "Min_T_ref_C": g["ref"].min()}
         for t in T_MIN_SCENARIOS:
-            row[f"h_below_{t:g}C_ref"] = int((g["T_ref_C"] <= t).sum())
-            row[f"h_below_{t:g}C_hp"] = int((g["T_hp_C"] <= t).sum())
+            row[f"Mean_T_hp_Tmin{t:g}C"] = g[t].mean()
+            row[f"Min_T_hp_Tmin{t:g}C"] = g[t].min()
+            row[f"Mean_dT_Tmin{t:g}C_K"] = g["dT_%g" % t].mean()
+            row[f"Min_dT_Tmin{t:g}C_K"] = g["dT_%g" % t].min()
+            # hours at/below the extraction limit of this run
+            row[f"h_below_{t:g}C_ref"] = int((g["ref"] <= t).sum())
+            row[f"h_below_{t:g}C_hp"] = int((g[t] <= t).sum())
         rows.append(row)
     df_yr = pd.DataFrame(rows).round(3)
 
-    hdr = "".join(f"{f'<={t:g}C ref/hp':<16}" for t in T_MIN_SCENARIOS)
-    print(f"\n  {'Year':<6}{'T_ref':<8}{'T_hp':<8}{'mean dT':<9}{'min dT':<9}"
-          f"{'Tmin ref':<10}{'Tmin hp':<9}{hdr}")
-    print(f"  {'-' * (59 + 16 * len(T_MIN_SCENARIOS))}")
+    hdr = "".join(f"{f'dT {t:g}C':<10}{f'<={t:g}C ref/hp':<16}" for t in T_MIN_SCENARIOS)
+    print(f"\n  {'Year':<6}{'T_ref':<8}{'Tmin ref':<10}{hdr}")
+    print(f"  {'-' * (24 + 26 * len(T_MIN_SCENARIOS))}")
     for _, r in df_yr.iterrows():
         h = ""
         for t in T_MIN_SCENARIOS:
             n_ref = int(r["h_below_%gC_ref" % t])
             n_hp = int(r["h_below_%gC_hp" % t])
-            h += f"{f'{n_ref}/{n_hp}':<16}"
-        print(f"  {int(r['Year']):<6}{r['Mean_T_ref_C']:<8.2f}{r['Mean_T_hp_C']:<8.2f}"
-              f"{r['Mean_dT_K']:<+9.3f}{r['Min_dT_K']:<+9.3f}"
-              f"{r['Min_T_ref_C']:<10.2f}{r['Min_T_hp_C']:<9.2f}{h}")
+            h += f"{r['Mean_dT_Tmin%gC_K' % t]:<+10.3f}{f'{n_ref}/{n_hp}':<16}"
+        print(f"  {int(r['Year']):<6}{r['Mean_T_ref_C']:<8.2f}{r['Min_T_ref_C']:<10.2f}{h}")
     for t in T_MIN_SCENARIOS:
-        print(f"  Mean hours <= {t:g} °C: ref {df_yr[f'h_below_{t:g}C_ref'].mean():.0f} h/yr, "
-              f"HP feedback {df_yr[f'h_below_{t:g}C_hp'].mean():.0f} h/yr")
+        print(f"  Mean hours <= {t:g} °C: ref {df_yr['h_below_%gC_ref' % t].mean():.0f} h/yr, "
+              f"HP feedback (Tmin {t:g} °C) {df_yr['h_below_%gC_hp' % t].mean():.0f} h/yr")
 
     # --- Monthly table (mean over all years, spread across years) ---
-    ym = df.groupby(["year", "month"])["dT_K"].mean().unstack("year")
-    df_mon = pd.DataFrame({
-        "Month": range(1, 13),
-        "Mean_T_ref_C": df.groupby("month")["T_ref_C"].mean().values,
-        "Mean_T_hp_C": df.groupby("month")["T_hp_C"].mean().values,
-        "Mean_dT_K": ym.mean(axis=1).values,
-        "Min_year_dT_K": ym.min(axis=1).values,
-        "Max_year_dT_K": ym.max(axis=1).values,
-    }).round(3)
+    mon = {"Month": list(range(1, 13)),
+           "Mean_T_ref_C": df.groupby("month")["ref"].mean().values}
+    for t in T_MIN_SCENARIOS:
+        ym = df.groupby(["year", "month"])["dT_%g" % t].mean().unstack("year")
+        mon[f"Mean_T_hp_Tmin{t:g}C"] = df.groupby("month")[t].mean().values
+        mon[f"Mean_dT_Tmin{t:g}C_K"] = ym.mean(axis=1).values
+        mon[f"Min_year_dT_Tmin{t:g}C_K"] = ym.min(axis=1).values
+        mon[f"Max_year_dT_Tmin{t:g}C_K"] = ym.max(axis=1).values
+    df_mon = pd.DataFrame(mon).round(3)
 
     df_yr.to_csv(OUTPUT_BASE_DIR / "lake_temperature_comparison_annual.csv", index=False)
     df_mon.to_csv(OUTPUT_BASE_DIR / "lake_temperature_comparison_monthly.csv", index=False)
@@ -1321,35 +1330,37 @@ def compare_lake_temperatures(selected_year=None):
     if selected_year not in years:
         selected_year = years[len(years) // 2]
     d = df[df["year"] == selected_year]
-    hoy = np.arange(len(_drop_feb29(d.index, d["T_ref_C"].values)))
+    hoy = np.arange(len(_drop_feb29(d.index, d["ref"].values)))
+    col_hp = dict(zip(T_MIN_SCENARIOS, ["#ff8c00", "#008080", "#6a0dad", "#228b22"]))
+    ls_tmin = dict(zip(T_MIN_SCENARIOS, ["--", ":", "-.", "--"]))
 
     fig, axes = plt.subplots(3, 1, figsize=(16, 15),
                              gridspec_kw={"height_ratios": [2, 1.3, 1.5]})
 
-    # A: both series, selected year
+    # A: all series, selected year
     ax = axes[0]
-    ax.plot(hoy, _drop_feb29(d.index, d["T_ref_C"].values), lw=1.6,
+    ax.plot(hoy, _drop_feb29(d.index, d["ref"].values), lw=1.6,
             color="#1f4e79", label="Without HP feedback")
-    ax.plot(hoy, _drop_feb29(d.index, d["T_hp_C"].values), lw=1.6,
-            color="#ff8c00", label="With HP feedback")
-    for t, ls in zip(T_MIN_SCENARIOS, ["--", ":"]):
-        ax.axhline(t, color="#c00000", ls=ls, lw=1.8, label=f"$T_{{min}}$ = {t:g} °C")
+    for t in T_MIN_SCENARIOS:
+        ax.plot(hoy, _drop_feb29(d.index, d[t].values), lw=1.4, color=col_hp[t],
+                label=f"With HP feedback ($T_{{min}}$ = {t:g} °C)")
+    for t in T_MIN_SCENARIOS:
+        ax.axhline(t, color="#c00000", ls=ls_tmin[t], lw=1.8,
+                   label=f"$T_{{min}}$ = {t:g} °C")
     ax.set_ylim(bottom=0)
     ax.set_ylabel("Lake Temperature [°C]")
-    ax.set_title(f"{LAKE_NAME} – Lake temperature at 13.5 m ({selected_year})",
+    ax.set_title(f"{LAKE_NAME} – Lake temperature at {LAKE_DEPTH_LABEL} ({selected_year})",
                  fontweight="bold")
-    ax.legend(loc="upper left", ncol=2)
+    ax.legend(loc="upper left", ncol=2, fontsize=13)
     set_month_xaxis(ax)
     ax.text(-0.02, 1.05, "A", transform=ax.transAxes, fontsize=22,
             fontweight="bold", va="bottom", ha="right")
 
     # B: hourly difference, selected year
     ax = axes[1]
-    dT_sel = _drop_feb29(d.index, d["dT_K"].values)
-    ax.fill_between(hoy, dT_sel, 0, where=dT_sel < 0, color="#1f4e79", alpha=0.5,
-                    lw=0, label="Cooler with HP feedback")
-    ax.fill_between(hoy, dT_sel, 0, where=dT_sel > 0, color="#c00000", alpha=0.5,
-                    lw=0, label="Warmer with HP feedback")
+    for t in T_MIN_SCENARIOS:
+        ax.plot(hoy, _drop_feb29(d.index, d["dT_%g" % t].values), lw=1.0,
+                color=col_hp[t], label=f"$T_{{min}}$ = {t:g} °C")
     ax.axhline(0, color="black", lw=1.0)
     ax.set_ylabel(r"$\Delta T$ [K]" "\n(HP − ref)")
     ax.legend(loc="lower right")
@@ -1361,19 +1372,23 @@ def compare_lake_temperatures(selected_year=None):
     # C: monthly mean difference, all years (bar = mean, whiskers = range of years)
     ax = axes[2]
     months = df_mon["Month"].values
-    ax.bar(months, df_mon["Mean_dT_K"], color="#008080", alpha=0.8, edgecolor="k",
-           lw=0.3, label=f"Mean {years[0]}–{years[-1]}")
-    ax.errorbar(months, df_mon["Mean_dT_K"],
-                yerr=[df_mon["Mean_dT_K"] - df_mon["Min_year_dT_K"],
-                      df_mon["Max_year_dT_K"] - df_mon["Mean_dT_K"]],
-                fmt="none", ecolor="black", capsize=4, lw=1.2,
-                label="Range of individual years")
+    n = len(T_MIN_SCENARIOS)
+    width = 0.8 / n
+    for i, t in enumerate(T_MIN_SCENARIOS):
+        m = df_mon[f"Mean_dT_Tmin{t:g}C_K"]
+        x = months + (i - (n - 1) / 2) * width
+        ax.bar(x, m, width, color=col_hp[t], alpha=0.8, edgecolor="k", lw=0.3,
+               label=f"$T_{{min}}$ = {t:g} °C")
+        ax.errorbar(x, m, yerr=[m - df_mon[f"Min_year_dT_Tmin{t:g}C_K"],
+                                df_mon[f"Max_year_dT_Tmin{t:g}C_K"] - m],
+                    fmt="none", ecolor="black", capsize=3, lw=1.0)
     ax.axhline(0, color="black", lw=1.0)
     ax.set_xticks(months)
     ax.set_xticklabels(["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
     ax.set_ylabel(r"Monthly mean $\Delta T$ [K]")
-    ax.set_xlabel("Month")
+    ax.set_xlabel(f"Month (bars: mean {years[0]}–{years[-1]}, "
+                  f"whiskers: range of individual years)")
     ax.legend(loc="lower right")
     ax.text(-0.02, 1.05, "C", transform=ax.transAxes, fontsize=22,
             fontweight="bold", va="bottom", ha="right")
@@ -1715,10 +1730,10 @@ def main():
     # --- Scenario loop ---
     demand_cache = {}
     summaries = []
-    for temp_key, temp_csv in LAKE_TEMP_SCENARIOS.items():
+    for temp_key, csv_by_tmin in LAKE_TEMP_SCENARIOS.items():
         for t_min in T_MIN_SCENARIOS:
             summaries.append(run_scenario(
-                temp_key, temp_csv, t_min, lake_vol_mcm, lake_area_km2,
+                temp_key, csv_by_tmin[t_min], t_min, lake_vol_mcm, lake_area_km2,
                 static, df_air, complete_years_air, annual_demand_kWh,
                 demand_cache,
             ))
