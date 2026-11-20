@@ -1,6 +1,0 @@
-{
-    "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "python.defaultInterpreterPath": "D:/Users/pau07368/.conda/envs/rivers-potential/python.exe",
-    "python.terminal.activateEnvironment": true
-}
