@@ -40,13 +40,12 @@ cfg = Config()
 # Lakes: one or more HydroLAKES IDs. Several lakes are treated as ONE combined
 # lake: volumes, areas and economic heat (Heat_EI_ge1_MWh) are summed, and the
 # single temperature series LAKE_TEMP_CSV is applied to the combined lake.
-LAKE_IDS = [13463, 13454]            # e.g. [13463, <second Hylak_id>]
+LAKE_IDS = [13463]            # e.g. [13463, <second Hylak_id>]
 LAKE_NAME = "Lake Schwerin"   # used in titles and console output
 
 # Optional hard-coded volume [Mio m3] per lake ID (None / not listed = HydroLAKES Vol_total)
 LAKE_VOLUME_OVERRIDE_MCM = {
     13463: 356,
-    13454: 331,
 }
 OUTPUT_BASE_DIR = Path(cfg.results_dir) / "CaseStudy_Schwerin"
 OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
