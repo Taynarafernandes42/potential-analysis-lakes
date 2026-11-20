@@ -6,6 +6,12 @@ Combined Analysis: Lake Thermal Potential vs. District Heating Demand
 3. Overlay plot for a year with outages
 4. Daily coverage heatmap (all years)
 5. Hourly deficit heatmap (all years)
+
+Scenarios: every step from the hourly potential onwards is run for
+  - two lake temperature series (without / with heat-pump feedback to the lake)
+  - two minimum extraction temperatures (2 °C / 3 °C)
+Each scenario writes to its own subfolder; scenario_comparison.csv
+in the base folder collects the key results of all scenarios.
 """
 
 from pathlib import Path
@@ -42,18 +48,31 @@ LAKE_VOLUME_OVERRIDE_MCM = {
     13463: 356,
     13454: 331,
 }
-OUTPUT_DIR = Path(cfg.results_dir) / "CaseStudy_Schwerin"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_BASE_DIR = Path(cfg.results_dir) / "CaseStudy_Schwerin"
+OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR = OUTPUT_BASE_DIR  # set per scenario in run_scenario()
 
-LAKE_TEMP_CSV = Path("Data/Raw/schwerin_temperature_13.5m_hourly.csv")
 AIR_TEMP_CSV = Path("Data/Raw/schwerin_airtemp_1994_2020.csv")
+
+# ------------------------------------------------------------
+# SCENARIOS: lake temperature series x minimum extraction temperature
+# Every combination is computed; results go to
+#   OUTPUT_BASE_DIR / "<temp_key>_Tmin<T>C"
+# ------------------------------------------------------------
+LAKE_TEMP_SCENARIOS = {
+    # analysis without heat-pump feedback to the lake
+    "no_hp_feedback": Path("Data/Raw/schwerin_temperature_13.5m_hourly.csv"),
+    # analysis with heat-pump feedback to the lake
+    "hp_feedback": Path("Data/Raw/schwerin_temperature_13.5m_hourly_heat_pump.csv"),
+}
+T_MIN_SCENARIOS = [2.0, 3.0]  # minimum lake temperature for extraction [°C]
 
 # Physical / technical parameters
 RHO = cfg.density_water
 CP = cfg.cp_water
 DELTA_T_TECH = cfg.deltaT_technical_extractable
 DELTA_T_HEX_MAX = 5.0
-T_MIN_EXTRACTION = 3.0
+T_MIN_EXTRACTION = 3.0  # overwritten per scenario in run_scenario()
 
 # COP parameters: Lorenz-efficiency approach (Pieper et al. 2019/2020)
 #   COP(t) = eta_L * T_H,lm / (T_H,lm - T_C,lm(t))
@@ -1153,17 +1172,14 @@ def climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
     return df
 
 
+
+
 # ============================================================
-# MAIN
+# MAIN – shared inputs (independent of scenario)
 # ============================================================
 
-def main():
-    print("=" * 60)
-    print("  COMBINED ANALYSIS: THERMAL POTENTIAL vs. HEATING DEMAND")
-    print(f"  {LAKE_NAME} (Hylak_id={', '.join(str(i) for i in LAKE_IDS)})")
-    print("=" * 60)
-
-    # --- Load lake geometry (one or several lakes -> combined lake) ---
+def load_lake_geometry():
+    """Volume and area of the (combined) lake."""
     lakes_gdf = read_lakes(cfg, cfg.target_crs)
     lakes_gdf["Hylak_id"] = lakes_gdf["Hylak_id"].astype(int)
 
@@ -1188,24 +1204,222 @@ def main():
         print(f"  Combined ({len(LAKE_IDS)} lakes):")
     print(f"  Area: {lake_area_km2:.2f} km2")
     print(f"  Volume: {lake_vol_mcm:.2f} Mio m3 ({lake_vol_mcm/1e3:.4f} km3)")
+    return lake_vol_mcm, lake_area_km2
 
-    # --- Load lake temperature data ---
+
+def load_economic_demand_kWh():
+    """Annual demand = economic potential (Heat_EI_ge1_MWh) of the lake(s)."""
+    economic_csv_path = Path("Data/Processed/economic_potential_comparison.csv")
+    df_economic = pd.read_csv(economic_csv_path)
+    df_economic["Hylak_id"] = df_economic["Hylak_id"].astype(int)
+    heat_ei_MWh = 0.0
+    for lid in LAKE_IDS:
+        lake_economic_row = df_economic[df_economic["Hylak_id"] == lid]
+        if lake_economic_row.empty:
+            print(f"  WARNING: Lake {lid} not in {economic_csv_path} -> 0 MWh economic heat")
+            continue
+        heat_lid = float(lake_economic_row.iloc[0]["Heat_EI_ge1_MWh"])
+        print(f"  Lake ID {lid}: Heat_EI_ge1 = {heat_lid/1e3:.3f} GWh")
+        heat_ei_MWh += heat_lid
+    if heat_ei_MWh <= 0:
+        raise ValueError(f"No economic heat for lakes {LAKE_IDS} in {economic_csv_path}")
+    return heat_ei_MWh * 1e3  # MWh -> kWh
+
+
+# ============================================================
+# STEP 0: COMPARISON OF THE LAKE TEMPERATURE SERIES
+# ============================================================
+
+def compare_lake_temperatures(selected_year=None):
+    """Compare the lake temperature series without / with heat-pump feedback.
+
+    Difference convention: dT = T_hp_feedback - T_no_hp_feedback
+    (negative = lake cooled by heat extraction).
+    Output in OUTPUT_BASE_DIR: plot, annual and monthly CSV tables.
+    """
+    print("\n" + "=" * 60)
+    print("  STEP 0: LAKE TEMPERATURE COMPARISON (no feedback vs. HP feedback)")
+    print("=" * 60)
+
+    key_ref, key_hp = "no_hp_feedback", "hp_feedback"
+    df_ref, yrs_ref = load_hourly_complete_years(LAKE_TEMP_SCENARIOS[key_ref], key_ref)
+    df_hp, yrs_hp = load_hourly_complete_years(LAKE_TEMP_SCENARIOS[key_hp], key_hp)
+    years = sorted(set(yrs_ref) & set(yrs_hp))
+    if not years:
+        raise ValueError("No common complete years in the two lake temperature series")
+
+    idx = df_ref.index.intersection(df_hp.index)
+    df = pd.DataFrame({
+        "T_ref_C": df_ref.loc[idx, "temp_C"],
+        "T_hp_C": df_hp.loc[idx, "temp_C"],
+    })
+    df = df[df.index.year.isin(years)]
+    df["dT_K"] = df["T_hp_C"] - df["T_ref_C"]
+    df["year"] = df.index.year
+    df["month"] = df.index.month
+
+    # --- Overall statistics ---
+    corr = df["T_ref_C"].corr(df["T_hp_C"])
+    rmse = float(np.sqrt((df["dT_K"] ** 2).mean()))
+    print(f"  Common years: {years[0]}-{years[-1]} ({len(years)} yrs, {len(df)} h)")
+    print(f"  Mean dT (HP - ref):  {df['dT_K'].mean():+.3f} K")
+    print(f"  Min / max dT:        {df['dT_K'].min():+.3f} / {df['dT_K'].max():+.3f} K")
+    print(f"  RMSE:                {rmse:.3f} K")
+    print(f"  Correlation (r):     {corr:.4f}")
+
+    # --- Annual table ---
+    rows = []
+    for y, g in df.groupby("year"):
+        row = {
+            "Year": y,
+            "Mean_T_ref_C": g["T_ref_C"].mean(),
+            "Mean_T_hp_C": g["T_hp_C"].mean(),
+            "Mean_dT_K": g["dT_K"].mean(),
+            "Min_dT_K": g["dT_K"].min(),
+            "Max_dT_K": g["dT_K"].max(),
+            "Min_T_ref_C": g["T_ref_C"].min(),
+            "Min_T_hp_C": g["T_hp_C"].min(),
+        }
+        for t in T_MIN_SCENARIOS:
+            row[f"h_below_{t:g}C_ref"] = int((g["T_ref_C"] <= t).sum())
+            row[f"h_below_{t:g}C_hp"] = int((g["T_hp_C"] <= t).sum())
+        rows.append(row)
+    df_yr = pd.DataFrame(rows).round(3)
+
+    hdr = "".join(f"{f'<={t:g}C ref/hp':<16}" for t in T_MIN_SCENARIOS)
+    print(f"\n  {'Year':<6}{'T_ref':<8}{'T_hp':<8}{'mean dT':<9}{'min dT':<9}"
+          f"{'Tmin ref':<10}{'Tmin hp':<9}{hdr}")
+    print(f"  {'-' * (59 + 16 * len(T_MIN_SCENARIOS))}")
+    for _, r in df_yr.iterrows():
+        h = ""
+        for t in T_MIN_SCENARIOS:
+            n_ref = int(r["h_below_%gC_ref" % t])
+            n_hp = int(r["h_below_%gC_hp" % t])
+            h += f"{f'{n_ref}/{n_hp}':<16}"
+        print(f"  {int(r['Year']):<6}{r['Mean_T_ref_C']:<8.2f}{r['Mean_T_hp_C']:<8.2f}"
+              f"{r['Mean_dT_K']:<+9.3f}{r['Min_dT_K']:<+9.3f}"
+              f"{r['Min_T_ref_C']:<10.2f}{r['Min_T_hp_C']:<9.2f}{h}")
+    for t in T_MIN_SCENARIOS:
+        print(f"  Mean hours <= {t:g} °C: ref {df_yr[f'h_below_{t:g}C_ref'].mean():.0f} h/yr, "
+              f"HP feedback {df_yr[f'h_below_{t:g}C_hp'].mean():.0f} h/yr")
+
+    # --- Monthly table (mean over all years, spread across years) ---
+    ym = df.groupby(["year", "month"])["dT_K"].mean().unstack("year")
+    df_mon = pd.DataFrame({
+        "Month": range(1, 13),
+        "Mean_T_ref_C": df.groupby("month")["T_ref_C"].mean().values,
+        "Mean_T_hp_C": df.groupby("month")["T_hp_C"].mean().values,
+        "Mean_dT_K": ym.mean(axis=1).values,
+        "Min_year_dT_K": ym.min(axis=1).values,
+        "Max_year_dT_K": ym.max(axis=1).values,
+    }).round(3)
+
+    df_yr.to_csv(OUTPUT_BASE_DIR / "lake_temperature_comparison_annual.csv", index=False)
+    df_mon.to_csv(OUTPUT_BASE_DIR / "lake_temperature_comparison_monthly.csv", index=False)
+    print(f"  > Tables saved: lake_temperature_comparison_annual/monthly.csv")
+
+    # --- Plot ---
+    if selected_year not in years:
+        selected_year = years[len(years) // 2]
+    d = df[df["year"] == selected_year]
+    hoy = np.arange(len(_drop_feb29(d.index, d["T_ref_C"].values)))
+
+    fig, axes = plt.subplots(3, 1, figsize=(16, 15),
+                             gridspec_kw={"height_ratios": [2, 1.3, 1.5]})
+
+    # A: both series, selected year
+    ax = axes[0]
+    ax.plot(hoy, _drop_feb29(d.index, d["T_ref_C"].values), lw=1.6,
+            color="#1f4e79", label="Without HP feedback")
+    ax.plot(hoy, _drop_feb29(d.index, d["T_hp_C"].values), lw=1.6,
+            color="#ff8c00", label="With HP feedback")
+    for t, ls in zip(T_MIN_SCENARIOS, ["--", ":"]):
+        ax.axhline(t, color="#c00000", ls=ls, lw=1.8, label=f"$T_{{min}}$ = {t:g} °C")
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("Lake Temperature [°C]")
+    ax.set_title(f"{LAKE_NAME} – Lake temperature at 13.5 m ({selected_year})",
+                 fontweight="bold")
+    ax.legend(loc="upper left", ncol=2)
+    set_month_xaxis(ax)
+    ax.text(-0.02, 1.05, "A", transform=ax.transAxes, fontsize=22,
+            fontweight="bold", va="bottom", ha="right")
+
+    # B: hourly difference, selected year
+    ax = axes[1]
+    dT_sel = _drop_feb29(d.index, d["dT_K"].values)
+    ax.fill_between(hoy, dT_sel, 0, where=dT_sel < 0, color="#1f4e79", alpha=0.5,
+                    lw=0, label="Cooler with HP feedback")
+    ax.fill_between(hoy, dT_sel, 0, where=dT_sel > 0, color="#c00000", alpha=0.5,
+                    lw=0, label="Warmer with HP feedback")
+    ax.axhline(0, color="black", lw=1.0)
+    ax.set_ylabel(r"$\Delta T$ [K]" "\n(HP − ref)")
+    ax.legend(loc="lower right")
+    set_month_xaxis(ax)
+    ax.set_xlabel("Hour of Year")
+    ax.text(-0.02, 1.05, "B", transform=ax.transAxes, fontsize=22,
+            fontweight="bold", va="bottom", ha="right")
+
+    # C: monthly mean difference, all years (bar = mean, whiskers = range of years)
+    ax = axes[2]
+    months = df_mon["Month"].values
+    ax.bar(months, df_mon["Mean_dT_K"], color="#008080", alpha=0.8, edgecolor="k",
+           lw=0.3, label=f"Mean {years[0]}–{years[-1]}")
+    ax.errorbar(months, df_mon["Mean_dT_K"],
+                yerr=[df_mon["Mean_dT_K"] - df_mon["Min_year_dT_K"],
+                      df_mon["Max_year_dT_K"] - df_mon["Mean_dT_K"]],
+                fmt="none", ecolor="black", capsize=4, lw=1.2,
+                label="Range of individual years")
+    ax.axhline(0, color="black", lw=1.0)
+    ax.set_xticks(months)
+    ax.set_xticklabels(["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+    ax.set_ylabel(r"Monthly mean $\Delta T$ [K]")
+    ax.set_xlabel("Month")
+    ax.legend(loc="lower right")
+    ax.text(-0.02, 1.05, "C", transform=ax.transAxes, fontsize=22,
+            fontweight="bold", va="bottom", ha="right")
+
+    plt.tight_layout()
+    stem = "lake_temperature_comparison"
+    fig.savefig(OUTPUT_BASE_DIR / f"{stem}.pdf", format="pdf", dpi=300, bbox_inches="tight")
+    fig.savefig(OUTPUT_BASE_DIR / f"{stem}.svg", format="svg", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  > Plot saved: {stem}.pdf and {stem}.svg")
+
+    return df_yr, df_mon
+
+
+# ============================================================
+# SCENARIO RUN
+# ============================================================
+
+def run_scenario(temp_key, temp_csv, t_min, lake_vol_mcm, lake_area_km2,
+                 static, df_air, complete_years_air, annual_demand_kWh,
+                 demand_cache):
+    """Run STEP 2-9 for one lake temperature series and one T_min.
+
+    The helper functions read the module-level T_MIN_EXTRACTION and
+    OUTPUT_DIR, so both are set here for the duration of the scenario.
+    """
+    global OUTPUT_DIR, T_MIN_EXTRACTION
+    T_MIN_EXTRACTION = float(t_min)
+    scenario_name = f"{temp_key}_Tmin{t_min:g}C"
+    OUTPUT_DIR = OUTPUT_BASE_DIR / scenario_name
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "#" * 60)
+    print(f"  SCENARIO: {scenario_name}")
+    print(f"  Lake temperature: {temp_csv}")
+    print(f"  T_min extraction: {T_MIN_EXTRACTION} °C")
+    print("#" * 60)
+
+    # --- Lake temperature data ---
     print()
-    df_lake, complete_years_lake = load_hourly_complete_years(LAKE_TEMP_CSV, "Lake temp")
+    df_lake, complete_years_lake = load_hourly_complete_years(temp_csv, "Lake temp")
     print(f"  Lake temp data: {complete_years_lake[0]}-{complete_years_lake[-1]}")
 
-    # --- Load air temperature data ---
-    df_air, complete_years_air = load_hourly_complete_years(AIR_TEMP_CSV, "Air temp")
-    print(f"  Air temp data:  {complete_years_air[0]}-{complete_years_air[-1]}")
-
-    # Common complete years
     common_years = sorted(set(complete_years_lake) & set(complete_years_air))
     print(f"  Common years:   {common_years[0]}-{common_years[-1]} ({len(common_years)} yrs)")
-
-    # =========================================================
-    # STEP 1: Static potential
-    # =========================================================
-    static = compute_static_potential(lake_vol_mcm)
 
     # =========================================================
     # STEP 2: Hourly dynamic potential
@@ -1242,37 +1456,25 @@ def main():
     outage_info = analyse_outages(df_hourly, complete_years_lake)
 
     # =========================================================
-    # STEP 4: Generate demand profile using economic potential from CSV
+    # STEP 4: Demand profile (cached: depends only on the years)
     # =========================================================
-    economic_csv_path = Path("Data/Processed/economic_potential_comparison.csv")
-    df_economic = pd.read_csv(economic_csv_path)
-    df_economic["Hylak_id"] = df_economic["Hylak_id"].astype(int)
-    heat_ei_MWh = 0.0
-    for lid in LAKE_IDS:
-        lake_economic_row = df_economic[df_economic["Hylak_id"] == lid]
-        if lake_economic_row.empty:
-            print(f"  WARNING: Lake {lid} not in {economic_csv_path} -> 0 MWh economic heat")
-            continue
-        heat_lid = float(lake_economic_row.iloc[0]["Heat_EI_ge1_MWh"])
-        print(f"  Lake ID {lid}: Heat_EI_ge1 = {heat_lid/1e3:.3f} GWh")
-        heat_ei_MWh += heat_lid
-    if heat_ei_MWh <= 0:
-        raise ValueError(f"No economic heat for lakes {LAKE_IDS} in {economic_csv_path}")
-    ANNUAL_DEMAND_TOTAL_KWH = heat_ei_MWh * 1e3  # MWh → kWh
-
-    Installed_Capacity = ANNUAL_DEMAND_TOTAL_KWH / cfg.hours_Water
     print(f"\n  >>> ANNUAL_DEMAND_TOTAL_KWH from CSV = "
-          f"{ANNUAL_DEMAND_TOTAL_KWH:,.0f} kWh ({ANNUAL_DEMAND_TOTAL_KWH/1e6:.3f} GWh)")
-    print(f"  >>> Corresponding Installed Capacity: {Installed_Capacity/1e3:.3f} MW")
+          f"{annual_demand_kWh:,.0f} kWh ({annual_demand_kWh/1e6:.3f} GWh)")
+    Installed_Capacity_kW = annual_demand_kWh / cfg.hours_Water
+    print(f"  >>> Corresponding Installed Capacity: {Installed_Capacity_kW/1e3:.3f} MW")
 
-    demand_series, demand_sh, demand_dhw = generate_demand_profile(
-        ANNUAL_DEMAND_TOTAL_KWH, df_air, common_years
-    )
+    key = tuple(common_years)
+    if key not in demand_cache:
+        demand_cache[key] = generate_demand_profile(
+            annual_demand_kWh, df_air, common_years
+        )
+    else:
+        print("\n  STEP 4: demand profile reused from previous scenario")
+    demand_series, demand_sh, demand_dhw = demand_cache[key]
 
     # =========================================================
     # CAP: Limit hourly lake potential at installed capacity
     # =========================================================
-    Installed_Capacity_kW = Installed_Capacity  # already in kW
     print(f"\n  >>> Capping lake thermal capacity at Installed Capacity: "
           f"{Installed_Capacity_kW/1e3:.3f} MW ({Installed_Capacity_kW:.1f} kW)")
 
@@ -1293,15 +1495,18 @@ def main():
     df_annual_common = df_annual[df_annual["year"].isin(common_years)]
     years_with_outages = df_annual_common[df_annual_common["hours_outage"] > 0]
 
-    if len(years_with_outages) > 0:
+    if SELECTED_YEAR_OVERRIDE is not None and SELECTED_YEAR_OVERRIDE in common_years:
+        # fixed year -> identical year in all scenarios (comparable plots)
+        selected_year = SELECTED_YEAR_OVERRIDE
+        sel_hours = int(df_annual_common.loc[
+            df_annual_common["year"] == selected_year, "hours_outage"].iloc[0])
+        print(f"\n  >>> Selected year (override): {selected_year} ({sel_hours} h outage)")
+    elif len(years_with_outages) > 0:
         mean_outage_hours = years_with_outages["hours_outage"].mean()
         closest_idx = (years_with_outages["hours_outage"] - mean_outage_hours).abs().idxmin()
         # Representative year: outage hours closest to the mean of all outage years
         selected_year = int(years_with_outages.loc[closest_idx, "year"])
-        if SELECTED_YEAR_OVERRIDE is not None:
-            selected_year = SELECTED_YEAR_OVERRIDE
-        sel_hours = int(df_annual_common.loc[
-            df_annual_common["year"] == selected_year, "hours_outage"].iloc[0])
+        sel_hours = int(years_with_outages.loc[closest_idx, "hours_outage"])
         print(f"\n  >>> Selected year: {selected_year} "
               f"({sel_hours} h outage, mean of outage years: {mean_outage_hours:.0f} h)")
     else:
@@ -1310,22 +1515,13 @@ def main():
         selected_year = int(df_annual_common.loc[median_idx, "year"])
         print(f"\n  >>> No outages found; using median year: {selected_year}")
 
-    # Plot combined analysis for selected year
     results = plot_potential_vs_demand(df_hourly, df_annual, demand_series, selected_year)
 
     # =========================================================
-    # STEP 6: Heatmap - Daily coverage all years
+    # STEP 6 / 7: Heatmaps
     # =========================================================
-    daily_coverage_matrix = plot_daily_coverage_heatmap(
-        df_hourly, demand_series, common_years
-    )
-
-    # =========================================================
-    # STEP 7: Heatmap - Hourly deficit all years
-    # =========================================================
-    deficit_matrix = plot_hourly_deficit_heatmap(
-        df_hourly, demand_series, common_years
-    )
+    plot_daily_coverage_heatmap(df_hourly, demand_series, common_years)
+    plot_hourly_deficit_heatmap(df_hourly, demand_series, common_years)
 
     # =========================================================
     # STEP 8: Annual Summary Table (Potential, Demand, Deficit, Utilization)
@@ -1335,7 +1531,7 @@ def main():
     print("=" * 60)
 
     annual_table_rows = []
-    for i, year in enumerate(common_years):
+    for year in common_years:
         pot_yr, dem_kW = _align_year(df_hourly, demand_series, year)
         if len(pot_yr) == 0:
             continue
@@ -1389,7 +1585,6 @@ def main():
 
     df_annual_table = pd.DataFrame(annual_table_rows)
 
-    # Print table
     print(f"\n  {'Year':<6}{'Useful':<10}{'Demand':<10}{'Deficit':<10}{'Def.lake':<10}"
           f"{'Def.cap':<10}{'Utiliz.':<10}{'Cov.%':<8}{'Lake extr.':<12}{'SPF':<6}")
     print(f"  {'':6}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}{'[GWh]':<10}"
@@ -1402,7 +1597,6 @@ def main():
               f"{row['Utilization_Potential_GWh']:<10.2f}{row['Coverage_pct']:<8.1f}"
               f"{row['Lake_Heat_Extracted_GWh']:<12.2f}{row['SPF']:<6.2f}")
 
-    # Mean values
     mean_lake_extracted = df_annual_table["Lake_Heat_Extracted_GWh"].mean()
     mean_potential = df_annual_table["Useful_Heat_GWh"].mean()
     mean_demand = df_annual_table["Demand_GWh"].mean()
@@ -1427,9 +1621,8 @@ def main():
         print(f"  Deficit share capacity-limited: {mean_def_cap / mean_deficit * 100:.1f}%")
 
     print(f"\n  >>> Mean Utilization Potential: {mean_utilization:.4f} GWh/yr "
-          f"({mean_utilization/(ANNUAL_DEMAND_TOTAL_KWH/1e6)*100:.1f}% of annual demand / economic potential)")
+          f"({mean_utilization/(annual_demand_kWh/1e6)*100:.1f}% of annual demand / economic potential)")
 
-    # Save as CSV
     csv_path = OUTPUT_DIR / "annual_potential_demand_utilization.csv"
     df_annual_table.to_csv(csv_path, index=False)
     print(f"  > Table saved: {csv_path}")
@@ -1444,28 +1637,115 @@ def main():
     # =========================================================
     # STEP 9: Climate-year comparison LSWSHP vs. ASHP (appendix)
     # =========================================================
-    climate_year_comparison(df_hourly, demand_series, demand_sh, demand_dhw,
-                            df_air, common_years, Installed_Capacity_kW)
+    df_climate = climate_year_comparison(
+        df_hourly, demand_series, demand_sh, demand_dhw,
+        df_air, common_years, Installed_Capacity_kW
+    )
 
     # =========================================================
-    # Save combined results
+    # Save combined results of this scenario
     # =========================================================
+    df_ann_c = df_annual[df_annual["year"].isin(common_years)]
     combined_summary = {
+        "scenario": scenario_name,
+        "lake_temp_series": temp_key,
+        "lake_temp_csv": str(temp_csv),
+        "T_min_C": T_MIN_EXTRACTION,
+        "years": f"{common_years[0]}-{common_years[-1]}",
+        "n_years": len(common_years),
         "lake_ids": ";".join(str(i) for i in LAKE_IDS),
         "lake_volume_mcm": lake_vol_mcm,
         "lake_area_km2": lake_area_km2,
         "static_lake_heat_GWh": static["potential_GWh"],
-        "annual_demand_GWh": ANNUAL_DEMAND_TOTAL_KWH / 1e6,
+        "annual_demand_GWh": annual_demand_kWh / 1e6,
+        # all-years means
+        "mean_lake_temp_C": df_ann_c["mean_temp_C"].mean(),
+        "mean_min_lake_temp_C": df_ann_c["min_temp_C"].mean(),
+        "mean_outage_h_yr": df_ann_c["hours_outage"].mean(),
+        "max_outage_h_yr": df_ann_c["hours_outage"].max(),
+        "max_outage_event_h": int(np.max(outage_info["outage_runs"])),
+        "mean_useful_heat_GWh": mean_potential,
+        "mean_covered_GWh": mean_utilization,
+        "mean_coverage_pct": mean_cov,
+        "min_coverage_pct": df_annual_table["Coverage_pct"].min(),
+        "mean_deficit_GWh": mean_deficit,
+        "mean_deficit_lake_GWh": mean_def_lake,
+        "mean_deficit_capacity_GWh": mean_def_cap,
+        "mean_lake_extracted_GWh": mean_lake_extracted,
+        "SPF_all_years": spf_all,
+        "SPF_min_year": df_annual_table["SPF"].min(),
+        "SPF_max_year": df_annual_table["SPF"].max(),
+        "mean_backup_share_pct": df_climate["Backup_share_pct"].mean(),
+        "mean_EI_factor": df_climate["EI_factor"].mean(),
+        "min_EI_factor": df_climate["EI_factor"].min(),
+        # selected-year results (STEP 5), prefixed to avoid name clashes
         "selected_year": selected_year,
-        **results,
+        **{f"sel_{k}": v for k, v in results.items() if k != "year"},
     }
     pd.DataFrame([combined_summary]).to_csv(
         OUTPUT_DIR / "combined_summary.csv", index=False
     )
+    print(f"\n  > Scenario {scenario_name} complete -> {OUTPUT_DIR}")
+    return combined_summary
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("=" * 60)
+    print("  COMBINED ANALYSIS: THERMAL POTENTIAL vs. HEATING DEMAND")
+    print(f"  {LAKE_NAME} (Hylak_id={', '.join(str(i) for i in LAKE_IDS)})")
+    print(f"  Scenarios: {list(LAKE_TEMP_SCENARIOS)} x T_min {T_MIN_SCENARIOS} °C")
+    print("=" * 60)
+
+    # --- Shared inputs (identical in all scenarios) ---
+    lake_vol_mcm, lake_area_km2 = load_lake_geometry()
+
+    print()
+    df_air, complete_years_air = load_hourly_complete_years(AIR_TEMP_CSV, "Air temp")
+    print(f"  Air temp data:  {complete_years_air[0]}-{complete_years_air[-1]}")
+
+    static = compute_static_potential(lake_vol_mcm)   # STEP 1 (no temperature)
+    annual_demand_kWh = load_economic_demand_kWh()
+
+    # --- STEP 0: how do the two lake temperature series differ? ---
+    compare_lake_temperatures(SELECTED_YEAR_OVERRIDE)
+
+    # --- Scenario loop ---
+    demand_cache = {}
+    summaries = []
+    for temp_key, temp_csv in LAKE_TEMP_SCENARIOS.items():
+        for t_min in T_MIN_SCENARIOS:
+            summaries.append(run_scenario(
+                temp_key, temp_csv, t_min, lake_vol_mcm, lake_area_km2,
+                static, df_air, complete_years_air, annual_demand_kWh,
+                demand_cache,
+            ))
+
+    # --- Scenario comparison ---
+    df_sc = pd.DataFrame(summaries)
+    csv_path = OUTPUT_BASE_DIR / "scenario_comparison.csv"
+    df_sc.to_csv(csv_path, index=False)
+
+    print("\n" + "=" * 60)
+    print("  SCENARIO COMPARISON (means over all common years)")
+    print("=" * 60)
+    print(f"  {'Scenario':<26}{'Outage':<9}{'Cov.%':<8}{'Deficit':<9}"
+          f"{'Lake ex.':<10}{'SPF':<7}{'EI fac.':<8}")
+    print(f"  {'':26}{'[h/yr]':<9}{'':8}{'[GWh]':<9}{'[GWh]':<10}{'':7}{'':8}")
+    print(f"  {'-' * 77}")
+    for _, r in df_sc.iterrows():
+        print(f"  {r['scenario']:<26}{r['mean_outage_h_yr']:<9.0f}"
+              f"{r['mean_coverage_pct']:<8.1f}{r['mean_deficit_GWh']:<9.2f}"
+              f"{r['mean_lake_extracted_GWh']:<10.2f}{r['SPF_all_years']:<7.2f}"
+              f"{r['mean_EI_factor']:<8.2f}")
+    print(f"  > Table saved: {csv_path}")
 
     print("\n" + "=" * 60)
     print("  > COMBINED ANALYSIS COMPLETE")
-    print(f"  Output: {OUTPUT_DIR}")
+    print(f"  Output: {OUTPUT_BASE_DIR}")
     print("=" * 60)
 
 
